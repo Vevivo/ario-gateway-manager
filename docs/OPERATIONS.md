@@ -35,7 +35,7 @@ gateway-storage finalize-backfill
 
 Yeni kolay kurulum Namecheap DNS API kullanır:
 
-1. Namecheap kullanıcı adı ve API key, `/etc/letsencrypt/namecheap.ini` dosyasında `0600` izinle saklanır.
+1. Namecheap kullanıcı adı ve API key, her domain için ayrı `/etc/letsencrypt/ar-io-DOMAIN-namecheap.ini` dosyasında `0600` izinle saklanır.
 2. Apex ve wildcard sertifika DNS challenge ile alınır.
 3. `certbot renew --dry-run` gerçek yenileme yolunu test eder.
 4. `certbot.timer` sertifikayı düzenli kontrol eder.
@@ -136,13 +136,17 @@ Bu komut volume silmeden servisleri yeniden oluşturur.
 | Troubleshooting | `gateway-doctor`, `gateway-check`, `gateway-logs` |
 | Grafana | Localhost-only izleme servisi |
 
-## Standart olmayan kurulum dizini
+## Kurulum dizini ve paylaşımlı sunucu
 
-Mevcut gateway `/opt/ar-io-node` dışında kuruluysa araçları eklerken:
+Yeni kurulumun varsayılan dizini `/opt/ar-io-gateway` konumudur. Docker Compose proje adı domain'e göre ayrılır ve node servis portları yalnız `127.0.0.1` üzerinde yayınlanır. NGINX yapılandırması domain'e özel bir site dosyasında tutulur; mevcut `default` sitesi değiştirilmez.
+
+Mevcut gateway başka bir dizinde kuruluysa yalnız yönetim araçlarını eklerken:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Vevivo/ario-gateway-manager/main/update-tools.sh | sudo env INSTALL_DIR=/srv/ar-io-node bash
 ```
+
+Tam kurucu mevcut `.env` veya gateway verisi görürse ayarları ezmemek için durur. Mevcut kurulumlarda tam kurucuyu yeniden çalıştırmak yerine `gateway-update` veya `update-tools.sh` kullanılmalıdır.
 
 ## Güvenlik sınırları
 
@@ -153,4 +157,4 @@ curl -fsSL https://raw.githubusercontent.com/Vevivo/ario-gateway-manager/main/up
 5. Grafana, Prometheus ve node-exporter public porta açılmaz.
 6. Zincir üstü para, stake ve ağ kayıt işlemleri otomatik yapılmaz.
 7. NGINX reload öncesinde yapılandırma doğrulanır.
-
+8. Kurucu mevcut NGINX sitelerini, başka projelerin portlarını veya kapalı bir UFW yapılandırmasını zorla değiştirmez.

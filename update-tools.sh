@@ -19,7 +19,7 @@ if [[ -z "$REQUESTED_DIR" && -f /etc/ar-io-gateway.conf ]]; then
 fi
 
 if [[ -z "$REQUESTED_DIR" ]]; then
-  for candidate in /opt/ar-io-node /opt/ar-io-gateway "$PWD"; do
+  for candidate in /opt/ar-io-gateway /opt/ar-io-node "$PWD"; do
     if [[ -f "$candidate/.env" && -f "$candidate/docker-compose.yaml" ]]; then
       REQUESTED_DIR="$candidate"
       break
@@ -28,7 +28,7 @@ if [[ -z "$REQUESTED_DIR" ]]; then
 fi
 
 [[ -n "$REQUESTED_DIR" && -f "$REQUESTED_DIR/.env" && -f "$REQUESTED_DIR/docker-compose.yaml" ]] || \
-  die "Could not find ar-io-node. Pass its path: sudo bash update-tools.sh /opt/ar-io-node"
+  die "Could not find ar-io-node. Pass its path: sudo bash update-tools.sh /opt/ar-io-gateway"
 
 printf "%b\n" "${YELLOW}Updating gateway helper commands...${NC}"
 printf "Gateway directory: %b%s%b\n" "$CYAN" "$REQUESTED_DIR" "$NC"

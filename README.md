@@ -12,6 +12,29 @@ Kurulum ekranı açılınca ilk soruda **Kolay kurulum** için yalnızca `Enter`
 
 > Bu araç sunucuyu kurar; gateway'i AR.IO Network'e kaydetmez, stake taşımaz ve sizin adınıza zincir üstü kayıt işlemi yapmaz.
 
+## Aynı sunucuda başka projeler varsa
+
+Ek bir klasör oluşturmanız gerekmez. Yeni gateway varsayılan olarak tek bir dizine kurulur:
+
+```text
+/opt/ar-io-gateway
+```
+
+Bu dizinin içinde resmi `ar-io-node` kodu, `.env`, wallet dosyaları, cache, veritabanları, loglar ve gateway'e ait Compose ek ayarı bulunur. Docker projesine domain'e özel bir ad verilir; böylece container, network ve volume adları diğer Compose projeleriyle karışmaz.
+
+Kurucu ayrıca:
+
+- `3000`, `4000` ve `5050` portlarını yalnızca `127.0.0.1` üzerinde yayınlar; internete doğrudan açmaz;
+- `/etc/nginx/sites-available/default` dosyasını değiştirmez;
+- `/etc/nginx/sites-available/ar-io-DOMAIN.conf` biçiminde ayrı bir NGINX site dosyası oluşturur;
+- NGINX çalışıyorsa `restart` yerine yapılandırmayı doğrulayıp `reload` yapar;
+- UFW kapalıysa kendiliğinden etkinleştirmez; açıksa yalnız gerekli `22`, `80` ve `443` kurallarını ekler;
+- sistem genelinde `apt upgrade` çalıştırmaz;
+- var olan Docker motorunu yükseltmez veya değiştirmez; Compose eklentisi eksik ya da eskiyse güvenli biçimde durur;
+- `80`, `443`, `3000`, `4000` veya `5050` üzerinde güvenli biçimde paylaşamayacağı bir çakışma görürse diğer projeyi durdurmak yerine kurulumu keser.
+
+Başka NGINX siteleri aynı sunucuda çalışabilir. Fakat Apache, Caddy veya Docker içindeki başka bir reverse proxy `80/443` portlarını kullanıyorsa kurucu o servisin ayarını değiştirmez; önce mevcut reverse proxy ile nasıl birleştirileceğine karar verilmelidir.
+
 ## Başlamadan önce hazırlayın
 
 | Gerekli bilgi | Ne hazırlamalısınız? |
@@ -294,6 +317,9 @@ Planlanan geliştirmeler: [Geliştirme yol haritası](docs/ROADMAP.md)
 
 ## Güvenlik
 
+- Gateway uygulama verileri `/opt/ar-io-gateway` altında tutulur ve Docker kaynakları domain'e özel proje adıyla ayrılır.
+- Node'un `3000`, `4000` ve `5050` portları yalnız localhost'a bağlıdır; public giriş NGINX üzerinden `80/443` ile yapılır.
+- Mevcut NGINX varsayılan sitesi, başka site dosyaları ve kapalı UFW durumu değiştirilmez.
 - Otomatik bakım `data/sqlite`, `data/redis` veya wallet dosyalarını silmez.
 - `docker compose down -v`, kontrolsüz `rm -rf` ve `docker volume prune` kullanılmaz.
 - Disk baskısı ar-io-node'un kendi cache reclaimer mekanizmasıyla yönetilir.

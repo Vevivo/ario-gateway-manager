@@ -8,7 +8,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/ar-io-node}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/ar-io-gateway}"
 MANAGER_URL="${GATEWAY_MANAGER_URL:-https://raw.githubusercontent.com/Vevivo/ario-gateway-manager/main/gateway-manager.sh}"
 DOMAIN="${ARNS_ROOT_HOST:-${DOMAIN:-}}"
 AR_IO_WALLET="${AR_IO_WALLET:-${ARIO_WALLET:-}}"
@@ -147,6 +147,22 @@ validate_solana_rpc_url() {
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "Please run as root: sudo bash install-gateway.sh"
+}
+
+guard_new_install() {
+  [[ "${ALLOW_EXISTING_INSTALL:-false}" == "true" ]] && return
+  if [[ -f "$INSTALL_DIR/.env" || -d "$INSTALL_DIR/data/sqlite" ]]; then
+    die "Existing gateway data found in $INSTALL_DIR. Do not run the full installer again. Use update-tools.sh or gateway-update. For an intentional recovery run, set ALLOW_EXISTING_INSTALL=true."
+  fi
+  if [[ "$INSTALL_DIR" == "/opt/ar-io-gateway" && -f /opt/ar-io-node/.env ]]; then
+    die "An existing gateway was found in /opt/ar-io-node. Use update-tools.sh or gateway-update instead of creating a second installation."
+  fi
+}
+
+version_at_least() {
+  local actual="${1#v}"
+  local required="${2#v}"
+  [[ "$(printf '%s\n' "$required" "$actual" | sort -V | head -n1)" == "$required" ]]
 }
 
 header() {
@@ -408,6 +424,33 @@ preflight() {
     confirm "Resmi minimumlardan dusuk olmasina ragmen devam edilsin mi" "n" || die "Kurulum on kontrolde iptal edildi."
   fi
 
+  if command -v ss >/dev/null 2>&1; then
+    local port listener
+    for port in 3000 4000 5050; do
+      listener="$(ss -H -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" { print; exit }')"
+      [[ -z "$listener" ]] || die "Port ${port} is already in use by another project: ${listener}"
+    done
+    for port in 80 443; do
+      listener="$(ss -H -ltnp 2>/dev/null | awk -v suffix=":${port}" '$4 ~ suffix "$" { print; exit }')"
+      if [[ -n "$listener" && "$listener" != *nginx* ]]; then
+        die "Port ${port} is already used by a non-NGINX service: ${listener}. The installer will not replace or interrupt it."
+      fi
+    done
+  else
+    warn "Port conflicts could not be checked because the ss command is unavailable."
+  fi
+
+  if [[ -d /etc/nginx/sites-enabled ]]; then
+    local site intended_site
+    intended_site="/etc/nginx/sites-available/ar-io-${DOMAIN//./-}.conf"
+    while IFS= read -r site; do
+      [[ "$(readlink -f "$site" 2>/dev/null || true)" == "$intended_site" ]] && continue
+      if grep -Fq "$DOMAIN" "$site" 2>/dev/null; then
+        die "Another NGINX site already mentions ${DOMAIN}: ${site}. The installer will not overwrite it."
+      fi
+    done < <(find /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print)
+  fi
+
   local apex_dns wildcard_dns
   apex_dns="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1 {print $1}')"
   wildcard_dns="$(getent ahostsv4 "gateway-check-${RANDOM}.${DOMAIN}" 2>/dev/null | awk 'NR==1 {print $1}')"
@@ -421,15 +464,14 @@ preflight() {
 install_packages() {
   log "[2/8] Installing base packages"
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y \
     curl openssh-server git certbot nginx sqlite3 build-essential \
     ca-certificates gnupg jq ufw lsb-release openssl dnsutils python3
   if [[ "$CERT_MODE" == "cloudflare" ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y python3-certbot-dns-cloudflare
   elif [[ "$CERT_MODE" == "namecheap" ]]; then
     local pip_args=()
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y python3-pip
     if python3 -m pip help install 2>/dev/null | grep -q -- '--break-system-packages'; then
       pip_args=(--break-system-packages)
     fi
@@ -441,9 +483,14 @@ install_packages() {
 
 install_docker() {
   log "[3/8] Installing Docker"
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    ok "Docker and Docker Compose are already installed."
-    systemctl enable --now docker >/dev/null 2>&1 || true
+  if command -v docker >/dev/null 2>&1; then
+    docker compose version >/dev/null 2>&1 || die "Docker is already installed, but the Compose plugin is missing. Install Docker Compose 2.24.4 or newer; this installer will not replace a shared Docker engine."
+    local compose_version
+    compose_version="$(docker compose version --short 2>/dev/null | tr -d '[:space:]')"
+    version_at_least "$compose_version" "2.24.4" || die "Docker Compose ${compose_version:-unknown} is too old. Version 2.24.4 or newer is required for safe port isolation."
+    ok "Existing Docker engine kept unchanged; compatible Docker Compose ${compose_version} found."
+    systemctl is-active --quiet docker || systemctl start docker
+    systemctl enable docker >/dev/null 2>&1 || true
     return
   fi
 
@@ -477,7 +524,7 @@ clone_node() {
 write_env() {
   log "[5/8] Writing .env"
   cd "$INSTALL_DIR"
-  local admin_key
+  local admin_key compose_project
   local existing_admin_key=""
   local log_level="info"
   if [[ -f .env ]]; then
@@ -485,11 +532,15 @@ write_env() {
     cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
   fi
   admin_key="${existing_admin_key:-$(openssl rand -hex 32)}"
+  compose_project="ario_gateway_$(printf "%s" "$DOMAIN" | tr '.' '_' | tr -cd 'a-z0-9_-')"
   [[ "$ENABLE_DEBUG_LOGS" == "true" ]] && log_level="debug"
 
   umask 077
   cat > .env <<EOF
 # Generated by Vevivo AR.IO Gateway Manager
+COMPOSE_PROJECT_NAME=${compose_project}
+COMPOSE_FILE=docker-compose.yaml:docker-compose.ario.yaml
+DOCKER_NETWORK_NAME=${compose_project}_ar-io-network
 NODE_ENV=production
 LOG_LEVEL=${log_level}
 ADMIN_API_KEY=${admin_key}
@@ -648,7 +699,24 @@ EOF
   fi
 
   chmod 600 .env
+  cat > docker-compose.ario.yaml <<'YAML'
+# Host isolation for shared servers. NGINX is the only public entry point.
+services:
+  envoy:
+    ports: !override
+      - "127.0.0.1:3000:3000"
+  core:
+    ports: !override
+      - "127.0.0.1:4000:4000"
+  observer:
+    ports: !override
+      - "127.0.0.1:5050:5050"
+  redis:
+    ports: !override []
+YAML
+  chmod 644 docker-compose.ario.yaml
   ok ".env written at ${INSTALL_DIR}/.env"
+  ok "Gateway files and Docker services are isolated under ${INSTALL_DIR}."
 }
 
 convert_key_material() {
@@ -937,19 +1005,25 @@ KEY_OPTIONS
 start_gateway() {
   log "[7/8] Starting gateway"
   cd "$INSTALL_DIR"
+  docker compose config --quiet || die "Docker Compose 2.24.4 or newer is required for safe port isolation. Update Docker Compose and run the installer again."
   docker compose pull
   docker compose up -d
 }
 
 configure_firewall_ssl_nginx() {
   log "[8/8] Firewall, SSL, nginx"
-  ufw allow OpenSSH >/dev/null || true
-  ufw allow 80/tcp >/dev/null || true
-  ufw allow 443/tcp >/dev/null || true
-  ufw --force enable >/dev/null || true
+  if ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow OpenSSH >/dev/null || true
+    ufw allow 80/tcp >/dev/null || true
+    ufw allow 443/tcp >/dev/null || true
+    ok "Existing UFW firewall updated for SSH, HTTP and HTTPS."
+  else
+    warn "UFW is inactive; the installer left it unchanged. Configure your provider firewall for TCP 22, 80 and 443."
+  fi
 
   if [[ "$CERT_MODE" == "namecheap" ]]; then
-    local credentials="/etc/letsencrypt/namecheap.ini"
+    local domain_slug="${DOMAIN//./-}"
+    local credentials="/etc/letsencrypt/ar-io-${domain_slug}-namecheap.ini"
     local force_args=()
     local renewal_auth=""
     umask 077
@@ -976,7 +1050,8 @@ configure_firewall_ssl_nginx() {
     fi
     ok "Namecheap DNS wildcard certificate configured."
   elif [[ "$CERT_MODE" == "cloudflare" ]]; then
-    local credentials="/etc/letsencrypt/cloudflare.ini"
+    local domain_slug="${DOMAIN//./-}"
+    local credentials="/etc/letsencrypt/ar-io-${domain_slug}-cloudflare.ini"
     local force_args=()
     local renewal_auth=""
     umask 077
@@ -1022,13 +1097,18 @@ configure_firewall_ssl_nginx() {
   fi
 
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
-  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx <<'HOOK'
+  local nginx_slug="${DOMAIN//./-}"
+  local nginx_site="/etc/nginx/sites-available/ar-io-${nginx_slug}.conf"
+  local nginx_link="/etc/nginx/sites-enabled/ar-io-${nginx_slug}.conf"
+  local deploy_hook="/etc/letsencrypt/renewal-hooks/deploy/ar-io-${nginx_slug}-reload-nginx"
+  local nginx_backup=""
+  cat > "$deploy_hook" <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
 nginx -t
 systemctl reload nginx
 HOOK
-  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+  chmod 755 "$deploy_hook"
   local active_auth=""
   if [[ -f "/etc/letsencrypt/renewal/${DOMAIN}.conf" ]]; then
     active_auth="$(sed -n 's/^authenticator = //p' "/etc/letsencrypt/renewal/${DOMAIN}.conf" | tail -n1)"
@@ -1039,7 +1119,11 @@ HOOK
     warn "Manual DNS certificates require a new TXT record at renewal. Run gateway-cert-setup to enable unattended renewal."
   fi
 
-  cat > /etc/nginx/sites-available/default <<EOF
+  if [[ -e "$nginx_site" ]]; then
+    nginx_backup="${nginx_site}.backup.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$nginx_site" "$nginx_backup"
+  fi
+  cat > "$nginx_site" <<EOF
 server {
     listen 80;
     listen [::]:80;
@@ -1077,10 +1161,23 @@ server {
     }
 }
 EOF
+  ln -sfn "$nginx_site" "$nginx_link"
 
-  nginx -t
-  systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl restart nginx
+  if ! nginx -t; then
+    rm -f "$nginx_link"
+    if [[ -n "$nginx_backup" ]]; then
+      cp -a "$nginx_backup" "$nginx_site"
+      ln -sfn "$nginx_site" "$nginx_link"
+    else
+      rm -f "$nginx_site"
+    fi
+    die "NGINX configuration validation failed; the previous site configuration was restored."
+  fi
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx
+  else
+    systemctl enable --now nginx
+  fi
   if [[ "$active_auth" != "manual" && -n "$active_auth" ]]; then
     log "Validating unattended certificate renewal"
     certbot renew --dry-run --cert-name "$DOMAIN"
@@ -1100,453 +1197,6 @@ install_manager() {
   install -m 755 "$temp" "$manager_path"
   rm -f "$temp"
   INSTALL_DIR="$INSTALL_DIR" "$manager_path" install-links "$INSTALL_DIR"
-}
-
-write_helpers() {
-  log "Creating helper commands"
-
-  cat > /usr/local/bin/gateway-update <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-git checkout main
-git pull --ff-only origin main
-docker compose pull
-docker compose up -d --force-recreate
-docker compose ps
-EOF
-
-  cat > /usr/local/bin/gateway-restart <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-docker compose up -d --force-recreate
-docker compose ps
-EOF
-
-  cat > /usr/local/bin/gateway-logs <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-docker compose logs -f --tail=120 core observer envoy
-EOF
-
-  cat > /usr/local/bin/gateway-status <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-echo "=== Docker services ==="
-docker compose ps
-echo
-echo "=== Resources ==="
-docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"
-echo
-echo "=== Disk ==="
-df -h ${INSTALL_DIR}
-EOF
-
-  cat > /usr/local/bin/gateway-check <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-DOMAIN="${DOMAIN}"
-TX="${GATEWAY_TEST_TX}"
-echo "=== 1984 content test ==="
-CONTENT_TMP="\$(mktemp)"
-ERR_TMP="\$(mktemp)"
-META="\$(curl -sS -L --max-time 45 -o "\${CONTENT_TMP}" -w "%{http_code}|%{content_type}|%{url_effective}" "https://\${DOMAIN}/\${TX}" 2>"\${ERR_TMP}" || true)"
-HTTP_CODE="\${META%%|*}"
-REST="\${META#*|}"
-CONTENT_TYPE="\${REST%%|*}"
-FINAL_URL="\${REST#*|}"
-if LC_ALL=C grep -a -qx "1984" "\${CONTENT_TMP}"; then
-  echo "1984"
-else
-  echo "Content test is not ready yet, or returned a redirect/cache response."
-  [[ -n "\${HTTP_CODE}" ]] && echo "HTTP: \${HTTP_CODE}"
-  [[ -n "\${CONTENT_TYPE}" ]] && echo "Content-Type: \${CONTENT_TYPE}"
-  [[ -n "\${FINAL_URL}" ]] && echo "Final URL: \${FINAL_URL}"
-  if [[ -s "\${ERR_TMP}" ]]; then
-    echo "curl:"
-    sed 's/^/  /' "\${ERR_TMP}"
-  fi
-  echo "Try again in a few minutes: curl -L https://\${DOMAIN}/\${TX}"
-fi
-rm -f "\${CONTENT_TMP}" "\${ERR_TMP}"
-echo
-echo "=== /ar-io/info ==="
-curl -fsS "https://\${DOMAIN}/ar-io/info" | jq '{release,wallet,programIds}' || true
-echo
-echo "=== observer report ==="
-if ! curl -fsS "https://\${DOMAIN}/ar-io/observer/reports/current" | jq .; then
-  echo "Observer report is not ready yet. This is common right after startup."
-  echo "If this persists, run: gateway-observer-check"
-  echo
-  echo "Observer container:"
-  cd ${INSTALL_DIR}
-  docker compose ps observer || true
-  echo
-  echo "Recent observer key/config errors:"
-  docker compose logs observer --tail=120 2>/dev/null \
-    | grep -Ei 'Operator Solana key is required|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|SOLANA_PRIVATE_KEY|OBSERVER_PRIVATE_KEY|wallet|error|warn' \
-    | tail -40 || true
-fi
-echo
-echo "=== local docker ==="
-cd ${INSTALL_DIR}
-docker compose ps
-EOF
-
-  cat > /usr/local/bin/gateway-x402-check <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-get_env() {
-  local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
-}
-echo "=== x402 / rate limiter env ==="
-docker compose exec core env | grep -E "^(ENABLE_RATE_LIMITER|RATE_LIMITER|ENABLE_X_402|X_402)" | sort || true
-echo
-echo "=== x402 / rate limiter metrics ==="
-curl -fsS http://localhost:3000/ar-io/__gateway_metrics | grep -Ei "rate_limit|token|x402|payment" || true
-echo
-echo "=== facilitator connectivity ==="
-FACILITATOR_URL="\$(get_env X_402_USDC_FACILITATOR_URL)"
-FACILITATOR_URL="\${FACILITATOR_URL:-https://facilitator.x402.rs}"
-curl -I --max-time 20 "\${FACILITATOR_URL}" || true
-echo
-echo "=== payment logs ==="
-docker compose logs core --tail=300 | grep -Ei "x402|payment|rate limit" || true
-EOF
-
-  cat > /usr/local/bin/gateway-enable-x402 <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-
-prompt() {
-  local label="\$1"
-  local default="\${2:-}"
-  local value
-  if [[ -n "\$default" ]]; then
-    read -r -p "\${label} [\${default}]: " value
-    printf "%s" "\${value:-\$default}"
-  else
-    read -r -p "\${label}: " value
-    printf "%s" "\$value"
-  fi
-}
-
-confirm() {
-  local label="\$1"
-  local default="\${2:-n}"
-  local suffix="[y/N]"
-  local value
-  [[ "\$default" == "y" ]] && suffix="[Y/n]"
-  read -r -p "\${label} \${suffix}: " value
-  value="\${value:-\$default}"
-  [[ "\$value" =~ ^[Yy]$ ]]
-}
-
-get_env() {
-  local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
-}
-
-is_evm_address() {
-  [[ "\$1" =~ ^0x[0-9a-fA-F]{40}$ ]]
-}
-
-[[ -f .env ]] || { echo ".env not found in ${INSTALL_DIR}"; exit 1; }
-
-echo "x402 post-install setup"
-echo "This only configures x402/rate limiter values. It does not reinstall your gateway."
-echo
-
-RATE_LIMITER_TYPE="\$(prompt "Rate limiter type" "\$(get_env RATE_LIMITER_TYPE)")"
-RATE_LIMITER_TYPE="\${RATE_LIMITER_TYPE:-redis}"
-if [[ "\$RATE_LIMITER_TYPE" != "redis" && "\$RATE_LIMITER_TYPE" != "memory" ]]; then
-  echo "Rate limiter type must be redis or memory."
-  exit 1
-fi
-
-RATE_LIMITER_REDIS_ENDPOINT="\$(prompt "Redis endpoint" "\$(get_env RATE_LIMITER_REDIS_ENDPOINT)")"
-RATE_LIMITER_REDIS_ENDPOINT="\${RATE_LIMITER_REDIS_ENDPOINT:-redis://redis:6379}"
-EXTRA_REDIS_FLAGS="\$(prompt "Redis persistence flags" "\$(get_env EXTRA_REDIS_FLAGS)")"
-EXTRA_REDIS_FLAGS="\${EXTRA_REDIS_FLAGS:---save 300 10 --appendonly yes --appendfsync everysec}"
-
-RATE_LIMITER_IP_BUCKET="\$(prompt "RATE_LIMITER_IP_TOKENS_PER_BUCKET" "\$(get_env RATE_LIMITER_IP_TOKENS_PER_BUCKET)")"
-RATE_LIMITER_IP_BUCKET="\${RATE_LIMITER_IP_BUCKET:-100000}"
-RATE_LIMITER_IP_REFILL="\$(prompt "RATE_LIMITER_IP_REFILL_PER_SEC" "\$(get_env RATE_LIMITER_IP_REFILL_PER_SEC)")"
-RATE_LIMITER_IP_REFILL="\${RATE_LIMITER_IP_REFILL:-20}"
-RATE_LIMITER_RESOURCE_BUCKET="\$(prompt "RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET" "\$(get_env RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET)")"
-RATE_LIMITER_RESOURCE_BUCKET="\${RATE_LIMITER_RESOURCE_BUCKET:-1000000}"
-RATE_LIMITER_RESOURCE_REFILL="\$(prompt "RATE_LIMITER_RESOURCE_REFILL_PER_SEC" "\$(get_env RATE_LIMITER_RESOURCE_REFILL_PER_SEC)")"
-RATE_LIMITER_RESOURCE_REFILL="\${RATE_LIMITER_RESOURCE_REFILL:-100}"
-
-X402_NETWORK="\$(prompt "x402 network: base for mainnet, base-sepolia for testnet" "\$(get_env X_402_USDC_NETWORK)")"
-X402_NETWORK="\${X402_NETWORK:-base}"
-if [[ "\$X402_NETWORK" != "base" && "\$X402_NETWORK" != "base-sepolia" ]]; then
-  echo "x402 network must be base or base-sepolia."
-  exit 1
-fi
-
-X402_FACILITATOR_DEFAULT="https://facilitator.x402.rs"
-[[ "\$X402_NETWORK" == "base-sepolia" ]] && X402_FACILITATOR_DEFAULT="https://x402.org/facilitator"
-
-while true; do
-  X402_WALLET_ADDRESS="\$(prompt "x402 EVM/Base USDC receiver wallet address" "\$(get_env X_402_USDC_WALLET_ADDRESS)")"
-  if is_evm_address "\$X402_WALLET_ADDRESS"; then
-    break
-  fi
-  echo "Please enter a valid EVM/Base wallet address like 0x..."
-done
-
-X402_FACILITATOR_URL="\$(prompt "x402 facilitator URL" "\$(get_env X_402_USDC_FACILITATOR_URL)")"
-X402_FACILITATOR_URL="\${X402_FACILITATOR_URL:-\$X402_FACILITATOR_DEFAULT}"
-X402_PER_BYTE_PRICE="\$(prompt "x402 per-byte price" "\$(get_env X_402_USDC_PER_BYTE_PRICE)")"
-X402_PER_BYTE_PRICE="\${X402_PER_BYTE_PRICE:-0.0000000001}"
-X402_MIN_PRICE="\$(prompt "x402 min price" "\$(get_env X_402_USDC_DATA_EGRESS_MIN_PRICE)")"
-X402_MIN_PRICE="\${X402_MIN_PRICE:-0.001}"
-X402_MAX_PRICE="\$(prompt "x402 max price" "\$(get_env X_402_USDC_DATA_EGRESS_MAX_PRICE)")"
-X402_MAX_PRICE="\${X402_MAX_PRICE:-1.00}"
-X402_CAPACITY_MULTIPLIER="\$(prompt "x402 capacity multiplier" "\$(get_env X_402_RATE_LIMIT_CAPACITY_MULTIPLIER)")"
-X402_CAPACITY_MULTIPLIER="\${X402_CAPACITY_MULTIPLIER:-10}"
-
-ARNS_ROOT_HOST="\$(get_env ARNS_ROOT_HOST)"
-X402_APP_NAME="\$(prompt "Paywall app name" "\$(get_env X_402_APP_NAME)")"
-X402_APP_NAME="\${X402_APP_NAME:-\${ARNS_ROOT_HOST:-My ar.io Gateway}}"
-X402_APP_LOGO="\$(prompt "Paywall app logo URL, blank allowed" "\$(get_env X_402_APP_LOGO)")"
-CHUNK_GET_BASE64_SIZE_BYTES="\$(prompt "CHUNK_GET_BASE64_SIZE_BYTES" "\$(get_env CHUNK_GET_BASE64_SIZE_BYTES)")"
-CHUNK_GET_BASE64_SIZE_BYTES="\${CHUNK_GET_BASE64_SIZE_BYTES:-368640}"
-RATE_LIMITER_IP_ALLOWLIST="\$(prompt "IP/CIDR allowlist, comma-separated, blank allowed" "\$(get_env RATE_LIMITER_IPS_AND_CIDRS_ALLOWLIST)")"
-RATE_LIMITER_ARNS_ALLOWLIST="\$(prompt "ArNS allowlist, comma-separated, blank allowed" "\$(get_env RATE_LIMITER_ARNS_ALLOWLIST)")"
-
-EXISTING_CDP_API_KEY_ID="\$(get_env CDP_API_KEY_ID)"
-EXISTING_X402_CDP_CLIENT_KEY="\$(get_env X_402_CDP_CLIENT_KEY)"
-EXISTING_CDP_SECRET_FILE="\$(get_env CDP_API_KEY_SECRET_FILE)"
-CDP_API_KEY_ID="\$EXISTING_CDP_API_KEY_ID"
-X402_CDP_CLIENT_KEY="\$EXISTING_X402_CDP_CLIENT_KEY"
-CDP_SECRET_VALUE=""
-
-if confirm "Configure optional Coinbase CDP onramp keys now" "n"; then
-  CDP_API_KEY_ID="\$(prompt "CDP_API_KEY_ID" "\$EXISTING_CDP_API_KEY_ID")"
-  X402_CDP_CLIENT_KEY="\$(prompt "X_402_CDP_CLIENT_KEY public client key" "\$EXISTING_X402_CDP_CLIENT_KEY")"
-  printf "Paste CDP API secret key (hidden, blank to keep existing/skip): " >&2
-  read -r -s CDP_SECRET_VALUE
-  printf "\\n" >&2
-fi
-
-cp .env ".env.backup.\$(date +%Y%m%d-%H%M%S)"
-TMP_ENV="\$(mktemp)"
-grep -Ev '^(ENABLE_RATE_LIMITER|RATE_LIMITER_TYPE|RATE_LIMITER_REDIS_ENDPOINT|RATE_LIMITER_IP_TOKENS_PER_BUCKET|RATE_LIMITER_IP_REFILL_PER_SEC|RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET|RATE_LIMITER_RESOURCE_REFILL_PER_SEC|EXTRA_REDIS_FLAGS|ENABLE_X_402_USDC_DATA_EGRESS|X_402_USDC_NETWORK|X_402_USDC_WALLET_ADDRESS|X_402_USDC_FACILITATOR_URL|X_402_USDC_PER_BYTE_PRICE|X_402_USDC_DATA_EGRESS_MIN_PRICE|X_402_USDC_DATA_EGRESS_MAX_PRICE|X_402_RATE_LIMIT_CAPACITY_MULTIPLIER|X_402_APP_NAME|X_402_APP_LOGO|CHUNK_GET_BASE64_SIZE_BYTES|RATE_LIMITER_IPS_AND_CIDRS_ALLOWLIST|RATE_LIMITER_ARNS_ALLOWLIST|CDP_API_KEY_ID|CDP_API_KEY_SECRET_FILE|X_402_CDP_CLIENT_KEY)=' .env > "\$TMP_ENV" || true
-
-cat >> "\$TMP_ENV" <<X402ENV
-
-# x402 configuration added by gateway-enable-x402
-ENABLE_RATE_LIMITER=true
-RATE_LIMITER_TYPE=\${RATE_LIMITER_TYPE}
-RATE_LIMITER_IP_TOKENS_PER_BUCKET=\${RATE_LIMITER_IP_BUCKET}
-RATE_LIMITER_IP_REFILL_PER_SEC=\${RATE_LIMITER_IP_REFILL}
-RATE_LIMITER_RESOURCE_TOKENS_PER_BUCKET=\${RATE_LIMITER_RESOURCE_BUCKET}
-RATE_LIMITER_RESOURCE_REFILL_PER_SEC=\${RATE_LIMITER_RESOURCE_REFILL}
-ENABLE_X_402_USDC_DATA_EGRESS=true
-X_402_USDC_NETWORK=\${X402_NETWORK}
-X_402_USDC_WALLET_ADDRESS=\${X402_WALLET_ADDRESS}
-X_402_USDC_FACILITATOR_URL=\${X402_FACILITATOR_URL}
-X_402_USDC_PER_BYTE_PRICE=\${X402_PER_BYTE_PRICE}
-X_402_USDC_DATA_EGRESS_MIN_PRICE=\${X402_MIN_PRICE}
-X_402_USDC_DATA_EGRESS_MAX_PRICE=\${X402_MAX_PRICE}
-X_402_RATE_LIMIT_CAPACITY_MULTIPLIER=\${X402_CAPACITY_MULTIPLIER}
-X_402_APP_NAME=\${X402_APP_NAME}
-X_402_APP_LOGO=\${X402_APP_LOGO}
-CHUNK_GET_BASE64_SIZE_BYTES=\${CHUNK_GET_BASE64_SIZE_BYTES}
-X402ENV
-
-if [[ "\$RATE_LIMITER_TYPE" == "redis" ]]; then
-  {
-    printf "RATE_LIMITER_REDIS_ENDPOINT=%s\\n" "\$RATE_LIMITER_REDIS_ENDPOINT"
-    printf "EXTRA_REDIS_FLAGS=%s\\n" "\$EXTRA_REDIS_FLAGS"
-  } >> "\$TMP_ENV"
-fi
-[[ -n "\$RATE_LIMITER_IP_ALLOWLIST" ]] && printf "RATE_LIMITER_IPS_AND_CIDRS_ALLOWLIST=%s\\n" "\$RATE_LIMITER_IP_ALLOWLIST" >> "\$TMP_ENV"
-[[ -n "\$RATE_LIMITER_ARNS_ALLOWLIST" ]] && printf "RATE_LIMITER_ARNS_ALLOWLIST=%s\\n" "\$RATE_LIMITER_ARNS_ALLOWLIST" >> "\$TMP_ENV"
-[[ -n "\$CDP_API_KEY_ID" ]] && printf "CDP_API_KEY_ID=%s\\n" "\$CDP_API_KEY_ID" >> "\$TMP_ENV"
-[[ -n "\$X402_CDP_CLIENT_KEY" ]] && printf "X_402_CDP_CLIENT_KEY=%s\\n" "\$X402_CDP_CLIENT_KEY" >> "\$TMP_ENV"
-
-if [[ -n "\$CDP_SECRET_VALUE" ]]; then
-  mkdir -p secrets
-  chmod 700 secrets
-  printf "%s" "\$CDP_SECRET_VALUE" > secrets/cdp_secret_key
-  chmod 600 secrets/cdp_secret_key
-  printf "CDP_API_KEY_SECRET_FILE=/app/secrets/cdp_secret_key\\n" >> "\$TMP_ENV"
-elif [[ -n "\$EXISTING_CDP_SECRET_FILE" ]]; then
-  printf "CDP_API_KEY_SECRET_FILE=%s\\n" "\$EXISTING_CDP_SECRET_FILE" >> "\$TMP_ENV"
-elif [[ -f secrets/cdp_secret_key ]]; then
-  printf "CDP_API_KEY_SECRET_FILE=/app/secrets/cdp_secret_key\\n" >> "\$TMP_ENV"
-fi
-unset CDP_SECRET_VALUE
-
-mv "\$TMP_ENV" .env
-chmod 600 .env
-
-echo
-echo "x402 env written. Restarting gateway services..."
-if [[ "\$RATE_LIMITER_TYPE" == "redis" ]]; then
-  docker compose up -d --force-recreate redis core envoy
-else
-  docker compose up -d --force-recreate core envoy
-fi
-
-echo
-gateway-x402-check || true
-EOF
-
-  cat > /usr/local/bin/gateway-balance <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-get_env() {
-  local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
-}
-
-DEFAULT_WALLET="\$(get_env OBSERVER_WALLET)"
-WALLET="\${1:-\${DEFAULT_WALLET}}"
-RPC="\$(get_env SOLANA_RPC_URL)"
-RPC="\${RPC:-https://api.mainnet-beta.solana.com}"
-
-echo "=== Solana balance ==="
-echo "wallet: \${WALLET}"
-echo "rpc: \${RPC%%\\?*}"
-
-if [[ "\${RPC}" == *"api-mainnet.helius-rpc.com"* || "\${RPC}" == *"/v0/transactions"* || "\${RPC}" == *"/v0/addresses"* ]]; then
-  echo "Wrong Helius URL: this is an Enhanced API endpoint, not a Solana JSON-RPC endpoint."
-  echo "Use the Helius RPCs panel URL instead: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
-  exit 1
-fi
-
-if command -v solana >/dev/null 2>&1; then
-  solana balance "\${WALLET}" --url "\${RPC}"
-  exit 0
-fi
-
-curl -fsS "\${RPC}" \\
-  -H "content-type: application/json" \\
-  -d "{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"getBalance\\",\\"params\\":[\\"\${WALLET}\\"]}" \\
-  | jq -r '
-      if type != "object" then
-        "balance lookup failed: RPC did not return a Solana JSON-RPC object. Check SOLANA_RPC_URL."
-      elif (.result.value? != null) then
-        "balance: " + ((.result.value / 1000000000) | tostring) + " SOL"
-      elif (.error.message? != null) then
-        "balance lookup failed: " + .error.message
-      else
-        "balance lookup failed: unknown RPC response. Check SOLANA_RPC_URL."
-      end
-    '
-EOF
-
-  cat > /usr/local/bin/gateway-observer-check <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd ${INSTALL_DIR}
-get_env() {
-  local key="\$1"
-  grep -E "^\${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true
-}
-
-echo "=== observer env ==="
-grep -E '^(ENABLE_EPOCH_CRANKING|SOLANA_KEYPAIR_PATH|OBSERVER_KEYPAIR_PATH|AR_IO_WALLET|OBSERVER_WALLET|SOLANA_RPC_URL)' .env \
-  | sed -E 's#api-key=[^& ]+#api-key=***#' || true
-echo
-
-echo "=== key files ==="
-OBSERVER_KEYPAIR_PATH="\$(get_env OBSERVER_KEYPAIR_PATH)"
-SOLANA_KEYPAIR_PATH="\$(get_env SOLANA_KEYPAIR_PATH)"
-if [[ -n "\${OBSERVER_KEYPAIR_PATH:-}" ]]; then
-  HOST_OBSERVER_KEY="${INSTALL_DIR}\${OBSERVER_KEYPAIR_PATH#/app}"
-  [[ -f "\${HOST_OBSERVER_KEY}" ]] && echo "observer key: OK \${HOST_OBSERVER_KEY}" || echo "observer key: MISSING \${HOST_OBSERVER_KEY}"
-fi
-if [[ -n "\${SOLANA_KEYPAIR_PATH:-}" ]]; then
-  HOST_SOLANA_KEY="${INSTALL_DIR}\${SOLANA_KEYPAIR_PATH#/app}"
-  [[ -f "\${HOST_SOLANA_KEY}" ]] && echo "cranker key: OK \${HOST_SOLANA_KEY}" || echo "cranker key: MISSING \${HOST_SOLANA_KEY}"
-fi
-echo
-
-echo "=== observer report endpoint ==="
-if ! curl -fsS "http://localhost:5050/ar-io/observer/reports/current" | jq .; then
-  ARNS_ROOT_HOST="\$(get_env ARNS_ROOT_HOST)"
-  if [[ -n "\${ARNS_ROOT_HOST:-}" ]]; then
-    echo "localhost:5050 unavailable; trying gateway domain..."
-    curl -fsS "https://\${ARNS_ROOT_HOST}/ar-io/observer/reports/current" | jq . || true
-  else
-    echo "localhost:5050 unavailable and ARNS_ROOT_HOST is not set."
-  fi
-fi
-echo
-
-echo "=== observer status ==="
-docker compose ps observer
-echo
-
-echo "=== observer recent warnings/errors ==="
-docker compose logs observer --tail=250 2>/dev/null | grep -Ei 'error|warn|epoch|pda|crank|prescribe|report|wallet|solana|signature|transaction' || true
-echo
-
-if docker compose logs observer --tail=400 2>/dev/null | grep -qEi 'Epoch [0-9]+ PDA not found|has prescribe_epoch run yet'; then
-  echo "Diagnosis: observer config and key loading may be OK, but the epoch PDA is missing on-chain."
-  echo "This usually leaves /ar-io/observer/reports/current at Report pending until the ar.io Solana epoch is prescribed/cranked."
-  echo "Keep the gateway running, watch for an ar.io-node update, and share this output with ar.io support if it persists."
-fi
-EOF
-
-  cat > /usr/local/bin/gateway-help <<'EOF'
-#!/usr/bin/env bash
-cat <<'HELP'
-ar.io Gateway helper commands
-
-gateway-check           Run public gateway, /ar-io/info, observer report, and Docker checks
-gateway-status          Show Docker services, resource usage, and disk usage
-gateway-logs            Follow core, observer, and envoy logs
-gateway-update          Pull latest ar-io-node and recreate services
-gateway-restart         Recreate services without deleting volumes
-gateway-balance         Check observer Solana wallet SOL balance
-gateway-observer-check  Diagnose observer key/env/report/epoch issues
-gateway-x402-check      Check x402/rate limiter env, metrics, facilitator, and logs
-gateway-enable-x402     Configure x402 later without reinstalling the gateway
-gateway-renew-cert      Renew wildcard SSL certificate with manual DNS challenge
-
-Typical follow-up:
-  gateway-check
-  gateway-status
-  gateway-observer-check
-
-Enable x402 later:
-  gateway-enable-x402
-HELP
-EOF
-
-  cat > /usr/local/bin/gateway-renew-cert <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-systemctl stop nginx || true
-certbot certonly --manual --preferred-challenges dns --agree-tos --register-unsafely-without-email -d ${DOMAIN} -d "*.${DOMAIN}"
-nginx -t
-systemctl restart nginx
-EOF
-
-  chmod +x /usr/local/bin/gateway-update \
-    /usr/local/bin/gateway-restart \
-    /usr/local/bin/gateway-logs \
-    /usr/local/bin/gateway-status \
-    /usr/local/bin/gateway-check \
-    /usr/local/bin/gateway-x402-check \
-    /usr/local/bin/gateway-enable-x402 \
-    /usr/local/bin/gateway-balance \
-    /usr/local/bin/gateway-observer-check \
-    /usr/local/bin/gateway-help \
-    /usr/local/bin/gateway-renew-cert
 }
 
 finish() {
@@ -1572,6 +1222,7 @@ finish() {
 main() {
   require_root
   header
+  guard_new_install
   collect_config
   preflight
   install_packages

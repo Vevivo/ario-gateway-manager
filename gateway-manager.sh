@@ -72,7 +72,7 @@ resolve_install_dir() {
   fi
 
   local candidate
-  for candidate in /opt/ar-io-node /opt/ar-io-gateway "$PWD"; do
+  for candidate in /opt/ar-io-gateway /opt/ar-io-node "$PWD"; do
     if [[ -f "$candidate/.env" && -f "$candidate/docker-compose.yaml" ]]; then
       INSTALL_DIR="$candidate"
       return
@@ -623,14 +623,18 @@ cmd_cert_check() {
 }
 
 install_cert_deploy_hook() {
+  local host slug hook
+  host="$(domain)"
+  slug="${host//./-}"
+  hook="/etc/letsencrypt/renewal-hooks/deploy/ar-io-${slug}-reload-nginx"
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
-  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx <<'HOOK'
+  cat > "$hook" <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
 nginx -t
 systemctl reload nginx
 HOOK
-  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+  chmod 755 "$hook"
 }
 
 cmd_cert_setup() {
@@ -657,7 +661,7 @@ OPTIONS
       read -r -s token
       printf "\n" >&2
       [[ -n "$token" ]] || die "Token cannot be empty."
-      credentials="/etc/letsencrypt/cloudflare.ini"
+      credentials="/etc/letsencrypt/ar-io-${host//./-}-cloudflare.ini"
       umask 077
       printf "dns_cloudflare_api_token = %s\n" "$token" > "$credentials"
       unset token
@@ -699,7 +703,7 @@ OPTIONS
       read -r -s api_key
       printf "\n" >&2
       [[ -n "$username" && -n "$api_key" ]] || die "Username and API key are required."
-      credentials="/etc/letsencrypt/namecheap.ini"
+      credentials="/etc/letsencrypt/ar-io-${host//./-}-namecheap.ini"
       umask 077
       printf "dns_namecheap_username = %s\ndns_namecheap_api_key = %s\n" "$username" "$api_key" > "$credentials"
       unset api_key
