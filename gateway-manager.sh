@@ -167,7 +167,8 @@ Storage and TLS
   gateway-storage-setup   Configure indexed or TTL 90% -> 85% protection
   gateway-cert-check      Show certificate expiry and renewal method
   gateway-cert-setup      Configure unattended Cloudflare/Namecheap renewal
-  gateway-renew-cert      Renew an automatic certificate, or guide manual DNS
+  gateway-cert-manual     Renew with guided Namecheap TXT records while live
+  gateway-renew-cert      Renew an automatic DNS-API certificate
 
 Observer and optional features
   gateway-balance         Check a Solana wallet balance
@@ -225,7 +226,7 @@ MENU
       2) cmd_status || true ;;
       3) cmd_logs || true ;;
       4) cmd_storage || true ;;
-      5) cmd_cert_check || true ;;
+      5) cmd_cert_menu || true ;;
       6) cmd_observer_check || true ;;
       7) cmd_balance || true ;;
       8) cmd_update || true ;;
@@ -647,7 +648,7 @@ cert_authenticator() {
 
 cmd_cert_check() {
   resolve_install_dir
-  local host cert end epoch now days auth
+  local host cert end epoch now days auth result=0
   host="$(domain)"
   [[ -n "$host" ]] || die "ARNS_ROOT_HOST is not set."
   cert="$(cert_path "$host")"
@@ -663,24 +664,29 @@ cmd_cert_check() {
   echo "renewal method: ${auth:-unknown}"
   if (( days < 0 )); then
     fail "Certificate has expired."
-    return 1
+    result=1
   elif (( days <= 5 )); then
     fail "Certificate expires within 5 days. Renew now."
-    return 1
+    result=1
   elif (( days <= 30 )); then
     warn "Certificate is inside Certbot's normal renewal window."
   else
     pass "Certificate has sufficient lifetime remaining."
   fi
   if [[ "$auth" == "manual" ]]; then
-    warn "Manual DNS certificates cannot renew unattended. Run gateway-cert-setup to migrate to a DNS API."
+    warn "Manual DNS cannot renew unattended. Run gateway-cert-manual to renew now, or gateway-cert-setup to enable a DNS API."
   fi
   if systemctl is-enabled certbot.timer >/dev/null 2>&1; then
-    pass "certbot.timer is enabled."
+    if [[ "$auth" == "manual" ]]; then
+      warn "certbot.timer is enabled system-wide, but it cannot renew this manual DNS certificate."
+    else
+      pass "certbot.timer is enabled."
+    fi
     systemctl list-timers certbot.timer --no-pager 2>/dev/null | tail -n +2 || true
   else
     warn "certbot.timer is not enabled."
   fi
+  return "$result"
 }
 
 install_cert_deploy_hook() {
@@ -696,6 +702,113 @@ nginx -t
 systemctl reload nginx
 HOOK
   chmod 755 "$hook"
+}
+
+cmd_cert_manual() {
+  require_root
+  resolve_install_dir
+  local host cert auth end epoch now days default_answer renewal stamp record_name
+  local force_args=()
+  host="$(domain)"
+  [[ -n "$host" ]] || die "ARNS_ROOT_HOST is not set."
+  command -v certbot >/dev/null 2>&1 || die "Certbot is not installed. Run gateway-cert-setup first."
+  command -v nginx >/dev/null 2>&1 || die "NGINX is not installed."
+  cert="$(cert_path "$host")"
+  auth="$(cert_authenticator "$host")"
+  record_name="_acme-challenge.${host}"
+  default_answer="y"
+
+  echo "=== Guided manual wildcard certificate renewal ==="
+  echo "Domain: $host"
+  if [[ -f "$cert" ]]; then
+    end="$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2-)"
+    epoch="$(date -d "$end" +%s)"
+    now="$(date +%s)"
+    days=$(( (epoch - now) / 86400 ))
+    echo "Current expiry: $end"
+    echo "Days remaining: $days"
+    force_args=(--force-renewal)
+    if (( days > 30 )); then
+      warn "More than 30 days remain. Renewing now is usually unnecessary and uses a Let's Encrypt issuance."
+      default_answer="n"
+    fi
+  else
+    warn "No existing certificate was found; this command will obtain the first one."
+  fi
+
+  if [[ -n "$auth" && "$auth" != "manual" ]]; then
+    warn "The current renewal method is '$auth'. Continuing changes this certificate to manual DNS renewal."
+  fi
+
+  cat <<GUIDE
+
+The gateway containers and NGINX will stay running. DNS-01 validation does not
+take port 80 and this command does not stop or restart either service.
+
+When Certbot displays the TXT record name and value:
+  1) Open Namecheap: Domain List -> Manage -> Advanced DNS -> Host Records.
+  2) Choose Add New Record -> TXT Record.
+  3) Copy the exact value displayed by Certbot.
+  4) Namecheap Host examples:
+       certificate domain example.com         -> _acme-challenge
+       certificate domain gateway.example.com -> _acme-challenge.gateway
+     Use the part before your purchased base domain; Certbot's full record is authoritative.
+  5) Set TTL to Automatic.
+  6) If Certbot requests a second value for the same Host, keep both TXT values
+     until every validation has completed.
+  7) In a second SSH terminal, wait until the requested value appears with:
+       dig +short TXT ${record_name} @1.1.1.1
+     Only then return here and press Enter in Certbot.
+
+Do not remove the TXT record(s) until Certbot reports success. After success,
+this helper checks NGINX, reloads it without downtime, and shows the new expiry.
+Manual certificates still require gateway-cert-manual again for each renewal.
+GUIDE
+
+  confirm "Start the manual DNS renewal now" "$default_answer" || {
+    info "No change was made."
+    return 0
+  }
+
+  renewal="/etc/letsencrypt/renewal/${host}.conf"
+  if [[ -f "$renewal" ]]; then
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -a "$renewal" "${renewal}.backup.${stamp}"
+  fi
+
+  certbot certonly --manual --preferred-challenges dns --agree-tos \
+    --register-unsafely-without-email --cert-name "$host" \
+    "${force_args[@]}" -d "$host" -d "*.${host}"
+
+  install_cert_deploy_hook
+  nginx -t
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx
+    pass "NGINX reloaded without stopping the gateway."
+  else
+    warn "The certificate was issued, but NGINX is not active; no reload was attempted."
+  fi
+  pass "Manual wildcard certificate renewal completed. Remove the temporary TXT record(s) from Namecheap."
+  cmd_cert_check || true
+}
+
+cmd_cert_menu() {
+  cat <<'OPTIONS'
+SSL certificate
+1) Show expiry and renewal method
+2) Configure automatic renewal (Namecheap or Cloudflare DNS API)
+3) Renew manually with guided Namecheap TXT records (gateway stays live)
+0) Back
+OPTIONS
+  local choice
+  choice="$(prompt "Select" "1")"
+  case "$choice" in
+    1) cmd_cert_check ;;
+    2) cmd_cert_setup ;;
+    3) cmd_cert_manual ;;
+    0) return ;;
+    *) die "Unknown selection." ;;
+  esac
 }
 
 cmd_cert_setup() {
@@ -799,11 +912,7 @@ OPTIONS
       cmd_cert_check
       ;;
     4)
-      certbot certonly --manual --preferred-challenges dns --agree-tos --register-unsafely-without-email \
-        --cert-name "$host" -d "$host" -d "*.${host}"
-      nginx -t
-      systemctl reload nginx
-      warn "Manual DNS is active. It cannot renew unattended because a new TXT record is required each time."
+      cmd_cert_manual
       ;;
     *) die "Unknown selection." ;;
   esac
@@ -817,13 +926,15 @@ cmd_renew_cert() {
   auth="$(cert_authenticator "$host")"
   if [[ "$auth" == "manual" || -z "$auth" ]]; then
     warn "This certificate uses manual DNS. Certbot cannot renew it without a new TXT record."
-    cmd_cert_setup
+    cmd_cert_manual
     return
   fi
   if [[ "${1:-}" == "--dry-run" ]]; then
     certbot renew --dry-run --cert-name "$host"
   else
-    certbot renew --cert-name "$host" --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+    certbot renew --cert-name "$host"
+    nginx -t
+    systemctl reload nginx
   fi
   cmd_cert_check
 }
@@ -1253,7 +1364,7 @@ Safe upgrade
   guide:   https://docs.ar.io/build/run-a-gateway/manage/upgrading-a-gateway/
 
 Automatic wildcard SSL
-  commands: gateway-cert-setup, gateway-cert-check, gateway-renew-cert --dry-run
+  commands: gateway-cert-setup, gateway-cert-check, gateway-cert-manual, gateway-renew-cert --dry-run
   guide:    https://docs.ar.io/build/run-a-gateway/manage/ssl-certs/
 
 Verification and HTTP signatures
@@ -1487,7 +1598,7 @@ cmd_install_links() {
     gateway gateway-help gateway-check gateway-doctor gateway-status gateway-logs \
     gateway-release-check gateway-update gateway-restart gateway-balance gateway-observer-check \
     gateway-network-info \
-    gateway-storage gateway-storage-setup gateway-cert-check gateway-cert-setup \
+    gateway-storage gateway-storage-setup gateway-cert-check gateway-cert-setup gateway-cert-manual \
     gateway-renew-cert gateway-x402-check gateway-enable-x402 gateway-grafana \
     gateway-filters gateway-block-name gateway-unblock-name gateway-features \
     gateway-apex gateway-verification gateway-cdb64-check gateway-cache-advisor \
@@ -1540,6 +1651,7 @@ dispatch() {
     storage-setup) cmd_storage_setup "$@" ;;
     cert-check) cmd_cert_check "$@" ;;
     cert-setup) cmd_cert_setup "$@" ;;
+    cert-manual) cmd_cert_manual "$@" ;;
     renew-cert) cmd_renew_cert "$@" ;;
     x402-check) cmd_x402_check "$@" ;;
     enable-x402) cmd_enable_x402 "$@" ;;

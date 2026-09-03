@@ -45,11 +45,12 @@ Kontrol komutları:
 
 ```bash
 gateway-cert-check
+gateway-cert-manual
 gateway-renew-cert --dry-run
 gateway-cert-setup
 ```
 
-`gateway-cert-check` bitime 30 gün kala uyarı, son 5 günde kritik durum gösterir. Manuel DNS seçeneği TXT kaydı gerektirdiğinden gözetimsiz yenilenemez.
+`gateway-cert-check` bitime 30 gün kala uyarı, son 5 günde kritik durum gösterir. `gateway-cert-manual`, Namecheap Advanced DNS ekranındaki TXT kaydı adımlarını göstererek DNS-01 doğrulaması yapar. Bu sırada gateway container'larını veya NGINX'i durdurmaz. Sertifika başarıyla alındıktan sonra `nginx -t` çalıştırır, NGINX'i `reload` eder ve yeni tarihi gösterir. Manuel DNS gözetimsiz yenilenemez; her yenilemede bu komut yeniden çalıştırılmalıdır.
 
 ## Observer teşhisi
 

@@ -15,7 +15,7 @@ done
 
 help_output="$(./gateway-manager.sh help)"
 for command in \
-  gateway-doctor gateway-storage-setup gateway-cert-setup gateway-enable-x402 \
+  gateway-doctor gateway-storage-setup gateway-cert-setup gateway-cert-manual gateway-enable-x402 \
   gateway-network-info gateway-network-readiness gateway-verification gateway-cdb64-check gateway-cache-advisor gateway-release-check \
   gateway-guides; do
   grep -q "$command" <<< "$help_output" || fail "$command is missing from gateway-help"
@@ -64,6 +64,11 @@ grep -q 'ports: !override \[\]' install-gateway.sh || fail "Redis host port is s
 grep -q 'sites-available/ar-io-' install-gateway.sh || fail "domain-specific NGINX site is missing"
 ! grep -q 'cat > /etc/nginx/sites-available/default' install-gateway.sh || fail "installer overwrites the default NGINX site"
 ! grep -q 'systemctl restart nginx' install-gateway.sh || fail "installer restarts the shared NGINX service"
+! grep -q 'systemctl \(stop\|restart\) nginx' gateway-manager.sh || fail "certificate helper interrupts shared NGINX"
+grep -q 'cert-manual) cmd_cert_manual' gateway-manager.sh || fail "manual certificate shortcut dispatch is missing"
+grep -q -- '--preferred-challenges dns' gateway-manager.sh || fail "manual certificate helper does not use DNS-01"
+grep -q 'Domain List -> Manage -> Advanced DNS' gateway-manager.sh || fail "Namecheap manual TXT guidance is missing"
+grep -q 'systemctl reload nginx' gateway-manager.sh || fail "safe NGINX certificate reload is missing"
 ! grep -q 'ufw --force enable' install-gateway.sh || fail "installer force-enables UFW"
 ! grep -q 'apt-get upgrade' install-gateway.sh || fail "installer upgrades unrelated system packages"
 grep -q 'Install Docker Compose 2.24.4 or newer' install-gateway.sh || fail "shared Docker engine protection is missing"

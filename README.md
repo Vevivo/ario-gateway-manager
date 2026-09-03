@@ -272,6 +272,7 @@ Günlük kullanımda en çok gerekenler:
 | `gateway-restart` | Volume silmeden servisleri yeniden oluşturur ve kontrol eder |
 | `gateway-storage` | Disk koruması ve cache durumunu gösterir |
 | `gateway-cert-check` | Sertifika süresini ve otomatik yenilemeyi kontrol eder |
+| `gateway-cert-manual` | Gateway çalışırken Namecheap TXT kaydıyla manuel wildcard sertifika yeniler |
 | `gateway-observer-check` | Observer, keypair, epoch ve son hataları kontrol eder |
 | `gateway-balance` | Observer veya verilen Solana adresinin bakiyesini gösterir |
 
@@ -318,6 +319,35 @@ gateway-release-check
 ```
 
 `FOREGROUND_CACHE_MAX_SIZE` ve `FOREGROUND_CACHE_CONCURRENCY` için tek bir doğru değer yoktur. Resmi sürüm bunları varsayılan olarak sınırsız bırakır; bu repo da sunucunun trafik ve disk yapısını bilmeden rastgele sınır koymaz. Durumu görmek için `gateway-cache-advisor` kullanılabilir.
+
+## Sertifikayı manuel yenilemek
+
+Namecheap API kullanmak istemeyen bir operatör wildcard sertifikayı gateway'i kapatmadan yenileyebilir:
+
+```bash
+sudo gateway-cert-manual
+```
+
+Komut önce mevcut son kullanma tarihini ve kalan gün sayısını gösterir. Sertifikanın bitmesine 30 günden fazla varsa gereksiz Let's Encrypt isteğini önlemek için varsayılan cevap `Hayır` olur. Devam edilirse Certbot DNS TXT doğrulaması başlatılır; `docker compose down`, NGINX `stop` veya `restart` çalıştırılmaz.
+
+Certbot ekranda bir kayıt adı ve uzun bir TXT değeri gösterdiğinde Namecheap'te şu yolu açın:
+
+`Domain List > Manage > Advanced DNS > Host Records > Add New Record > TXT Record`
+
+| Sertifika alan adı | Namecheap `Host` alanı |
+|---|---|
+| `example.com` | `_acme-challenge` |
+| `gateway.example.com` ve satın alınan domain `example.com` | `_acme-challenge.gateway` |
+
+`Value` alanına Certbot'un o adımda gösterdiği değeri eksiksiz yapıştırın, `TTL` değerini `Automatic` bırakın. Certbot aynı Host için ikinci bir değer isterse ilkini silmeyin; iki TXT kaydını da doğrulama tamamen bitene kadar tutun.
+
+İkinci bir SSH penceresinde komutun ekranda verdiği `dig` kontrolünü çalıştırın. Beklenen TXT değeri görünmeden Certbot ekranında `Enter` tuşuna basmayın. Certbot başarı bildirdikten sonra yardımcı komut:
+
+1. NGINX yapılandırmasını `nginx -t` ile doğrular.
+2. NGINX'i kesintisiz `reload` eder.
+3. Yeni sertifika bitiş tarihini tekrar gösterir.
+
+Eski sertifika doğrulama başarısız olduğunda yerinde kalır ve gateway çalışmayı sürdürür. Başarılı işlemden sonra geçici `_acme-challenge` TXT kayıtlarını silebilirsiniz. Manuel sertifika kendi kendine yenilenmez; sonraki yenilemede aynı komutu tekrar çalıştırın. Otomatiğe geçmek isterseniz `sudo gateway-cert-setup` ile Namecheap DNS API seçeneğini kullanın.
 
 ## Mevcut gateway'e yalnız yönetim araçlarını eklemek
 
