@@ -60,6 +60,7 @@ RATE_LIMITER_IP_ALLOWLIST=""
 RATE_LIMITER_ARNS_ALLOWLIST=""
 EXTRA_REDIS_FLAGS="--save 300 10 --appendonly yes --appendfsync everysec"
 ENABLE_DEBUG_LOGS="false"
+INSTALL_MODE="easy"
 
 log() { printf "%b\n" "${CYAN}==>${NC} $*"; }
 ok() { printf "%b\n" "${GREEN}OK${NC} $*"; }
@@ -69,14 +70,14 @@ die() { printf "%b\n" "${RED}ERROR${NC} $*" >&2; exit 1; }
 prompt() {
   local label="$1"
   local default="${2:-}"
-  local value
+  local value=""
   if [[ -n "$default" ]]; then
     printf "%s [%s]: " "$label" "$default" >&2
-    read -r value
+    read -r value < /dev/tty
     printf "%s" "${value:-$default}"
   else
     printf "%s: " "$label" >&2
-    read -r value
+    read -r value < /dev/tty
     printf "%s" "$value"
   fi
 }
@@ -85,10 +86,10 @@ confirm() {
   local label="$1"
   local default="${2:-n}"
   local suffix="[y/N]"
-  local value
+  local value=""
   [[ "$default" == "y" ]] && suffix="[Y/n]"
   printf "%s %s: " "$label" "$suffix" >&2
-  read -r value
+  read -r value < /dev/tty
   value="${value:-$default}"
   value="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')"
   [[ "$value" == "y" || "$value" == "yes" || "$value" == "e" || "$value" == "evet" ]]
@@ -163,112 +164,141 @@ header() {
                 Solana-era production setup
 EOF
   echo
-  echo "This installer sets up:"
-  echo "  - ar-io-node from main"
-  echo "  - Docker Compose services"
-  echo "  - nginx reverse proxy"
-  echo "  - wildcard SSL with Certbot DNS challenge"
-  echo "  - Solana operator and observer keyfile placement"
-  echo "  - optional x402 USDC data egress payments"
-  echo "  - helper commands: gateway-check, logs, status, update"
+  echo "Bu kurucu AR.IO gateway, observer, NGINX, otomatik SSL ve disk"
+  echo "korumasini kurar. Kolay mod ilk kurulum icin onerilen ayarlari kullanir."
   echo
-  echo "It does NOT register or change your gateway on the platform."
+  echo "Not: Gateway'i AR.IO Network'e kaydetmez ve stake islemi yapmaz."
   echo
 }
 
 collect_config() {
-  log "[1/8] Configuration"
+  log "[1/8] Kurulum modu"
 
-  DOMAIN="$(normalize_domain "$(prompt "Gateway domain" "$DOMAIN")")"
-  is_domain "$DOMAIN" || die "Enter a valid apex domain such as gateway.example. Do not include a URL, path, or wildcard."
+  cat <<'MODE_OPTIONS'
+Kurulum modu:
+  1) Kolay kurulum (onerilen)
+     Yalniz gerekli bilgileri sorar. Guvenli disk ayarlari acik,
+     observer yuklemeleri Turbo, cranking ve x402 kapali kurulur.
 
-  AR_IO_WALLET="$(prompt "Main Solana gateway wallet address" "$AR_IO_WALLET")"
-  is_solana_address "$AR_IO_WALLET" || die "AR_IO_WALLET must be a base58 Solana public key."
+  2) Gelismis kurulum
+     Depolama, SSL saglayicisi, AR upload, cranking ve x402 seceneklerini sorar.
+MODE_OPTIONS
+  local mode_choice
+  mode_choice="$(prompt "Seciminiz" "1")"
+  case "$mode_choice" in
+    1) INSTALL_MODE="easy" ;;
+    2) INSTALL_MODE="advanced" ;;
+    *) die "Kurulum modu 1 veya 2 olmali." ;;
+  esac
+
+  echo
+  log "Gerekli gateway bilgileri"
+  echo "Alan adini https:// ve *. olmadan yazin. Ornek: gateway.example.com"
+
+  DOMAIN="$(normalize_domain "$(prompt "Gateway alan adi" "$DOMAIN")")"
+  is_domain "$DOMAIN" || die "gateway.example.com gibi gecerli bir alan adi girin; https://, yol veya *. eklemeyin."
+
+  echo
+  echo "AR.IO kaydinizdaki ana/operator Solana PUBLIC adresini yazin."
+  echo "Bu alana seed phrase veya private key yazmayin."
+  AR_IO_WALLET="$(prompt "Ana Solana gateway adresi" "$AR_IO_WALLET")"
+  is_solana_address "$AR_IO_WALLET" || die "Ana wallet gecerli bir Solana public adresi olmali."
 
   if [[ -z "$OBSERVER_WALLET" ]]; then
     OBSERVER_WALLET="$AR_IO_WALLET"
   fi
-  OBSERVER_WALLET="$(prompt "Observer Solana wallet address, Enter = same as main wallet" "$OBSERVER_WALLET")"
-  is_solana_address "$OBSERVER_WALLET" || die "OBSERVER_WALLET must be a base58 Solana public key."
+  echo
+  echo "Observer icin ayni wallet'i kullaniyorsaniz sadece Enter'a basin."
+  echo "AR.IO kaydinizda ayri observer varsa onun PUBLIC adresini yazin."
+  OBSERVER_WALLET="$(prompt "Observer Solana adresi (Enter = ana wallet ile ayni)" "$OBSERVER_WALLET")"
+  is_solana_address "$OBSERVER_WALLET" || die "Observer wallet gecerli bir Solana public adresi olmali."
   if [[ "$OBSERVER_WALLET" == "$AR_IO_WALLET" ]]; then
-    echo "Observer wallet: same as main Solana gateway wallet."
+    ok "Observer ana Solana wallet ile ayni olacak."
   else
-    echo "Observer wallet: ${OBSERVER_WALLET}"
+    ok "Ayri observer wallet kullanilacak: ${OBSERVER_WALLET}"
   fi
 
-  echo "GRAPHQL_HOST: ${GRAPHQL_HOST}"
-  echo "START_HEIGHT: ${START_HEIGHT}"
-
   echo
-  warn "Public Solana RPC is rate-limited. For reward reliability, use Helius, Triton, QuickNode, or another premium RPC if you have one."
-  warn "For Helius, copy the RPC URL from the left RPCs panel: https://mainnet.helius-rpc.com/?api-key=..."
-  warn "Do not use Enhanced Solana APIs URLs such as /v0/transactions."
-  SOLANA_RPC_URL="$(prompt "Solana RPC URL, Enter = public mainnet RPC" "$SOLANA_RPC_URL")"
+  echo "Solana RPC saglayicinizdaki TAM mainnet URL'sini yapistirin."
+  echo "Helius ornegi: https://mainnet.helius-rpc.com/?api-key=..."
+  echo "URL'niz yoksa Enter public RPC'yi kullanir; uretimde ozel RPC onerilir."
+  SOLANA_RPC_URL="$(prompt "Solana RPC URL" "$SOLANA_RPC_URL")"
   SOLANA_RPC_URL="$(normalize_solana_rpc_url "$SOLANA_RPC_URL")"
   validate_solana_rpc_url "$SOLANA_RPC_URL"
 
   echo
-  echo "Disk protection uses ar-io-node's native cache reclaimers."
-  echo "Recommended defaults: start at 90%, drain below 85%, keep 20 GiB free."
-  if confirm "Enable automatic native disk protection" "y"; then
+  if [[ "$INSTALL_MODE" == "easy" ]]; then
+    STORAGE_PROTECTION_ENABLED="true"
+    STORAGE_PROFILE="indexed"
+    ok "Disk korumasi: %90'da baslat, %85'e indir, 20 GiB bos alan koru."
+  else
+    echo "Disk korumasi ar-io-node'un kendi cache temizleyicilerini kullanir."
+    echo "Onerilen: %90'da baslat, %85'in altina indir, 20 GiB bos alan koru."
+    if confirm "Otomatik disk korumasi acilsin mi" "y"; then
     STORAGE_PROTECTION_ENABLED="true"
     cat <<'STORAGE_OPTIONS'
-Storage profile:
-  1) Indexed eviction - production/large caches (recommended)
-  2) TTL filesystem walk - small SSD caches, simple age retention
+Depolama profili:
+  1) Indexed eviction - uretim/buyuk cache (onerilen)
+  2) TTL filesystem walk - kucuk SSD cache
 STORAGE_OPTIONS
     local storage_choice
-    storage_choice="$(prompt "Select storage profile" "1")"
+    storage_choice="$(prompt "Depolama profili" "1")"
     case "$storage_choice" in
       1) STORAGE_PROFILE="indexed" ;;
       2)
         STORAGE_PROFILE="ttl"
-        STORAGE_TTL_SECONDS="$(prompt "Base cache retention in seconds" "$STORAGE_TTL_SECONDS")"
-        [[ "$STORAGE_TTL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "Cache retention must be a positive whole number of seconds."
+        STORAGE_TTL_SECONDS="$(prompt "Cache saklama suresi (saniye)" "$STORAGE_TTL_SECONDS")"
+        [[ "$STORAGE_TTL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "Cache suresi pozitif tam sayi olmali."
         ;;
-      *) die "Storage profile must be 1 or 2." ;;
+      *) die "Depolama profili 1 veya 2 olmali." ;;
     esac
-    if ! confirm "Use the recommended 90% / 85% / 20 GiB values" "y"; then
-      STORAGE_HIGH_WATERMARK="$(prompt "Start eviction at disk usage percent" "$STORAGE_HIGH_WATERMARK")"
-      STORAGE_LOW_WATERMARK="$(prompt "Drain until disk usage is below percent" "$STORAGE_LOW_WATERMARK")"
-      STORAGE_MIN_FREE_GIB="$(prompt "Minimum free-space reserve in GiB" "$STORAGE_MIN_FREE_GIB")"
-      storage_values_valid "$STORAGE_LOW_WATERMARK" "$STORAGE_HIGH_WATERMARK" || die "Use integers with 1 <= low < high <= 99."
-      [[ "$STORAGE_MIN_FREE_GIB" =~ ^[0-9]+$ ]] || die "Free-space reserve must be a whole number of GiB."
+    if ! confirm "Onerilen %90 / %85 / 20 GiB degerleri kullanilsin mi" "y"; then
+      STORAGE_HIGH_WATERMARK="$(prompt "Temizligi baslatma yuzdesi" "$STORAGE_HIGH_WATERMARK")"
+      STORAGE_LOW_WATERMARK="$(prompt "Temizligi durdurma yuzdesi" "$STORAGE_LOW_WATERMARK")"
+      STORAGE_MIN_FREE_GIB="$(prompt "Korunacak bos alan (GiB)" "$STORAGE_MIN_FREE_GIB")"
+      storage_values_valid "$STORAGE_LOW_WATERMARK" "$STORAGE_HIGH_WATERMARK" || die "1 <= dusuk esik < yuksek esik <= 99 olmali."
+      [[ "$STORAGE_MIN_FREE_GIB" =~ ^[0-9]+$ ]] || die "Bos alan tam sayi GiB olmali."
     fi
-  else
-    STORAGE_PROTECTION_ENABLED="false"
+    else
+      STORAGE_PROTECTION_ENABLED="false"
+    fi
   fi
 
   echo
-  cat <<'SSL_OPTIONS'
-Wildcard SSL renewal method:
-  1) Namecheap DNS API - unattended renewal (recommended)
-  2) Cloudflare DNS API - unattended renewal
-  3) Manual DNS TXT record - works with any provider, cannot auto-renew
-SSL_OPTIONS
   local cert_choice
-  cert_choice="$(prompt "Select SSL method" "1")"
+  if [[ "$INSTALL_MODE" == "easy" ]]; then
+    cert_choice="1"
+    ok "SSL yontemi: Namecheap DNS API ile otomatik yenileme."
+  else
+    cat <<'SSL_OPTIONS'
+Wildcard SSL yenileme yontemi:
+  1) Namecheap DNS API - otomatik yenileme (onerilen)
+  2) Cloudflare DNS API - otomatik yenileme
+  3) Manuel DNS TXT - her saglayicida calisir, otomatik yenilenmez
+SSL_OPTIONS
+    cert_choice="$(prompt "SSL yontemi" "1")"
+  fi
   case "$cert_choice" in
     1)
       CERT_MODE="namecheap"
       local public_ipv4
-      warn "Namecheap API access normally requires 20 domains, a USD 50 balance, and USD 50 spent in the last two years; support may grant a waiver."
+      echo "Namecheap hesabinizda API erisimini acin ve asagidaki IPv4'u whitelist'e ekleyin."
+      warn "Namecheap API erisimi hesap kosullarina bagli olabilir; panel izin vermiyorsa Namecheap destekle gorusun."
       public_ipv4="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-      echo "Server public IPv4: ${public_ipv4:-could not be detected}"
+      echo "Sunucu public IPv4: ${public_ipv4:-tespit edilemedi}"
       echo "Namecheap: Profile -> Tools -> Namecheap API Access -> Whitelisted IPs"
-      warn "Namecheap accepts only whitelisted IPv4 addresses for API requests."
-      confirm "I enabled Namecheap API access and whitelisted this server IPv4" "n" || die "Configure Namecheap API access and the IPv4 whitelist, then run the installer again."
-      NAMECHEAP_USERNAME="$(prompt "Namecheap username" "$NAMECHEAP_USERNAME")"
-      printf "Namecheap API key (hidden): " >&2
-      read -r -s NAMECHEAP_API_KEY
+      confirm "API erisimi acik ve bu IPv4 whitelist'e eklendi mi" "n" || die "Namecheap API ve IPv4 whitelist ayarini tamamlayip kurulumu tekrar calistirin."
+      NAMECHEAP_USERNAME="$(prompt "Namecheap kullanici adi" "$NAMECHEAP_USERNAME")"
+      printf "Namecheap API key (yazdiginiz gorunmez): " >&2
+      read -r -s NAMECHEAP_API_KEY < /dev/tty
       printf "\n" >&2
-      [[ -n "$NAMECHEAP_USERNAME" && -n "$NAMECHEAP_API_KEY" ]] || die "Namecheap username and API key are required."
+      [[ -n "$NAMECHEAP_USERNAME" && -n "$NAMECHEAP_API_KEY" ]] || die "Namecheap kullanici adi ve API key zorunlu."
       ;;
     2)
       CERT_MODE="cloudflare"
       echo "Create a Cloudflare API token limited to Zone:Read and DNS:Edit for this domain."
       printf "Cloudflare API token (hidden): " >&2
-      read -r -s CLOUDFLARE_API_TOKEN
+      read -r -s CLOUDFLARE_API_TOKEN < /dev/tty
       printf "\n" >&2
       [[ -n "$CLOUDFLARE_API_TOKEN" ]] || die "Cloudflare API token cannot be empty."
       ;;
@@ -277,18 +307,21 @@ SSL_OPTIONS
   esac
 
   REPORT_DATA_SINK=""
-  if confirm "Observer report uploads use Turbo Credits by default. Use AR tokens instead" "n"; then
-    REPORT_DATA_SINK="arweave"
+  if [[ "$INSTALL_MODE" == "advanced" ]]; then
+    if confirm "Observer yuklemelerinde Turbo yerine AR token kullanilsin mi" "n"; then
+      REPORT_DATA_SINK="arweave"
+    fi
+
+    echo
+    warn "Ana/operator Solana keypair, cranking kapali olsa da gereklidir."
+    if confirm "Opsiyonel epoch cranking acilsin mi (SOL harcar)" "n"; then
+      ENABLE_EPOCH_CRANKING="true"
+    fi
+  else
+    ok "Observer upload: Turbo | Epoch cranking: kapali | x402: kapali"
   fi
 
-  echo
-  warn "The main/operator Solana keypair is required even when epoch cranking is off."
-  warn "Epoch cranking is optional. If enabled, it spends a small amount of SOL from the main/operator wallet."
-  if confirm "Enable optional epoch cranking with the main Solana wallet" "n"; then
-    ENABLE_EPOCH_CRANKING="true"
-  fi
-
-  if confirm "Enable optional x402 USDC data egress payments" "n"; then
+  if [[ "$INSTALL_MODE" == "advanced" ]] && confirm "Opsiyonel x402 USDC odemeleri acilsin mi" "n"; then
     X402_ENABLED="true"
     echo
     echo "x402 mainnet defaults will be used. You need an EVM/Base USDC receiver wallet."
@@ -336,14 +369,25 @@ SSL_OPTIONS
       CDP_API_KEY_ID="$(prompt "CDP_API_KEY_ID" "")"
       X402_CDP_CLIENT_KEY="$(prompt "X_402_CDP_CLIENT_KEY public client key" "")"
       printf "Paste CDP API secret key (hidden, blank to skip): " >&2
-      read -r -s CDP_SECRET_VALUE
+      read -r -s CDP_SECRET_VALUE < /dev/tty
       printf "\n" >&2
     fi
   fi
+
+  echo
+  echo "Kurulum ozeti:"
+  echo "  Domain:            ${DOMAIN}"
+  echo "  Operator wallet:   ${AR_IO_WALLET}"
+  echo "  Observer wallet:   ${OBSERVER_WALLET}"
+  echo "  Depolama korumasi: ${STORAGE_PROTECTION_ENABLED} (${STORAGE_PROFILE})"
+  echo "  SSL:               ${CERT_MODE}"
+  echo "  Epoch cranking:    ${ENABLE_EPOCH_CRANKING}"
+  echo "  x402:              ${X402_ENABLED}"
+  confirm "Bu ayarlarla kurulumu baslatayim mi" "y" || die "Kurulum kullanici tarafindan iptal edildi."
 }
 
 preflight() {
-  log "Preflight checks"
+  log "Kurulum oncesi kontroller"
   [[ "$INSTALL_DIR" == /* && "$INSTALL_DIR" != *[[:space:]]* ]] || die "INSTALL_DIR must be an absolute path without whitespace."
   command -v apt-get >/dev/null 2>&1 || die "This installer requires a Debian/Ubuntu system with apt-get."
   [[ -f /etc/os-release ]] || die "Cannot identify the operating system."
@@ -355,21 +399,21 @@ preflight() {
   disk_probe="$(dirname "$INSTALL_DIR")"
   while [[ ! -e "$disk_probe" && "$disk_probe" != "/" ]]; do disk_probe="$(dirname "$disk_probe")"; done
   disk_gib="$(( $(df -Pk "$disk_probe" | awk 'NR==2 {print $2}') / 1024 / 1024 ))"
-  echo "Detected: ${cpu_count} CPU, ${memory_gib} GiB RAM, ${disk_gib} GiB filesystem"
-  (( cpu_count >= 4 )) || { warn "Official minimum is 4 CPU cores."; warnings=$((warnings+1)); }
-  (( memory_gib >= 4 )) || { warn "Official minimum is 4 GiB RAM."; warnings=$((warnings+1)); }
-  (( disk_gib >= 500 )) || { warn "Official minimum is 500 GB storage; the recommended setup is a 2 TB SSD."; warnings=$((warnings+1)); }
+  echo "Tespit edilen: ${cpu_count} CPU, ${memory_gib} GiB RAM, ${disk_gib} GiB disk"
+  (( cpu_count >= 4 )) || { warn "Resmi minimum 4 CPU core."; warnings=$((warnings+1)); }
+  (( memory_gib >= 4 )) || { warn "Resmi minimum 4 GiB RAM."; warnings=$((warnings+1)); }
+  (( disk_gib >= 500 )) || { warn "Resmi minimum 500 GB; onerilen depolama 2 TB SSD."; warnings=$((warnings+1)); }
   if (( warnings > 0 )); then
-    confirm "Continue below one or more official minimums" "n" || die "Installation cancelled by preflight."
+    confirm "Resmi minimumlardan dusuk olmasina ragmen devam edilsin mi" "n" || die "Kurulum on kontrolde iptal edildi."
   fi
 
   local apex_dns wildcard_dns
   apex_dns="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1 {print $1}')"
   wildcard_dns="$(getent ahostsv4 "gateway-check-${RANDOM}.${DOMAIN}" 2>/dev/null | awk 'NR==1 {print $1}')"
-  echo "DNS apex: ${apex_dns:-not resolved} | wildcard: ${wildcard_dns:-not resolved}"
+  echo "DNS ana domain: ${apex_dns:-cozumlenemedi} | wildcard: ${wildcard_dns:-cozumlenemedi}"
   if [[ -z "$apex_dns" || -z "$wildcard_dns" ]]; then
-    warn "Both the apex and wildcard DNS records must resolve before certificate issuance."
-    confirm "DNS is still propagating; continue anyway" "n" || die "Fix DNS and run the installer again."
+    warn "Sertifika icin ana domain ve wildcard DNS kayitlarinin ikisi de cozumlenmeli."
+    confirm "DNS hala yayiliyor; yine de devam edilsin mi" "n" || die "DNS kayitlarini duzeltip kurulumu tekrar calistirin."
   fi
 }
 
@@ -838,62 +882,53 @@ configure_wallet() {
     return
   fi
 
-  echo "The ${role_label} expects a Solana keypair JSON file here:"
+  echo "Beklenen public adres: ${wallet_address}"
+  echo "Anahtar dogrulanip su dosyaya guvenli izinlerle kaydedilecek:"
   echo "  ${INSTALL_DIR}/${target}"
-  echo
-  echo "Paste or enter ONE key material value. The installer detects the format automatically:"
-  echo "  - existing JSON file path on this server, like /root/id.json"
-  echo "  - Solana keypair JSON array, like [192,15,...,17]"
-  echo "  - Phantom/Solana seed phrase words"
-  echo "  - exported Solana private key/base58"
-  echo
-  echo "Seed phrase/private key input is visible on purpose so you can catch typos."
-  echo "The derived public address must match: ${wallet_address}"
-  echo "Use this only on your own secure terminal."
   echo
 
   while true; do
-    local key_material
-    key_material="$(prompt "Key material for ${wallet_address}. Blank = multi-line paste, SKIP = add later" "")"
-
-    if [[ "${key_material,,}" == "skip" ]]; then
-      warn "Skipped keyfile. Gateway can serve traffic, but ${role_label} protocol actions need ${INSTALL_DIR}/${target}."
-      return
-    fi
-
-    if [[ -n "$key_material" ]]; then
-      if [[ -f "$key_material" ]]; then
-        if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$key_material"; then
-          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+    cat <<'KEY_OPTIONS'
+Anahtari nasil vereceksiniz?
+  1) Sunucudaki keypair JSON dosyasinin yolu (onerilen)
+  2) JSON array, seed phrase veya base58 private key yapistir
+  3) Simdilik atla
+KEY_OPTIONS
+    local key_choice key_material
+    key_choice="$(prompt "Seciminiz" "1")"
+    case "$key_choice" in
+      1)
+        echo "Ornek dosya yolu: /root/id.json"
+        key_material="$(prompt "Keypair JSON dosya yolu" "")"
+        if [[ -f "$key_material" ]] && try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address" < "$key_material"; then
+          ok "Keyfile kuruldu: ${INSTALL_DIR}/${target}"
           return
         fi
-        warn "That file did not contain key material for ${wallet_address}, or it was not valid."
-      else
+        warn "Dosya bulunamadi, gecersiz veya public adres ${wallet_address} ile eslesmiyor."
+        ;;
+      2)
+        echo "Gizli degeri tek satir olarak yapistirip Enter'a basin; ekranda gorunmez."
+        printf "Key material: " >&2
+        read -r -s key_material < /dev/tty
+        printf "\n" >&2
         if printf "%s" "$key_material" | try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-          ok "Keyfile installed: ${INSTALL_DIR}/${target}"
+          unset key_material
+          ok "Keyfile kuruldu: ${INSTALL_DIR}/${target}"
           return
         fi
-        if [[ "$key_material" == /* || "$key_material" == ./* || "$key_material" == *.json ]]; then
-          warn "Keypair file not found or invalid: ${key_material}"
-        else
-          warn "That key material did not derive ${wallet_address}, or it was not valid."
-        fi
-      fi
+        unset key_material
+        warn "Anahtar gecersiz veya public adres ${wallet_address} ile eslesmiyor."
+        ;;
+      3)
+        warn "Keyfile atlandi. Gateway veri sunabilir fakat ${role_label} protokol islemleri calismaz."
+        echo "Daha sonra eklenmesi gereken yer: ${INSTALL_DIR}/${target}"
+        return
+        ;;
+      *) warn "1, 2 veya 3 secin." ;;
+    esac
 
-      confirm "Try the ${role_label} keyfile step again" "y" && continue
-      warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
-      return
-    fi
-
-    echo "Paste the complete key material now, then press CTRL+D when finished."
-    echo "Accepted: JSON array, seed phrase words, or exported private key/base58."
-    if try_convert_key_material "${INSTALL_DIR}/${target}" "$wallet_address"; then
-      ok "Keyfile installed: ${INSTALL_DIR}/${target}"
-      return
-    fi
-    warn "That key material did not derive ${wallet_address}, or it was not valid."
-    confirm "Try the ${role_label} keyfile step again" "y" && continue
-    warn "Skipped keyfile. You can add it later at ${INSTALL_DIR}/${target}."
+    confirm "Anahtar adimini tekrar denemek ister misiniz" "y" && continue
+    warn "Keyfile atlandi. Daha sonra ${INSTALL_DIR}/${target} konumuna ekleyin."
     return
   done
 }
@@ -1515,34 +1550,20 @@ EOF
 
 finish() {
   echo
-  echo -e "${GREEN}Installation finished.${NC}"
-  echo "Gateway URL: https://${DOMAIN}"
+  echo -e "${GREEN}Kurulum tamamlandi.${NC}"
+  echo "Gateway: https://${DOMAIN}"
   echo
-  echo "Useful commands:"
-  echo "  gateway-check"
-  echo "  gateway-status"
-  echo "  gateway-logs"
-  echo "  gateway-update"
-  echo "  gateway-restart"
-  echo "  gateway-x402-check"
-  echo "  gateway-enable-x402"
-  echo "  gateway-balance"
-  echo "  gateway-observer-check"
-  echo "  gateway-storage"
-  echo "  gateway-cert-check"
+  echo "Simdi sirayla calistirin:"
   echo "  gateway-doctor"
-  echo "  gateway-features"
-  echo "  gateway-help"
-  echo "  gateway-renew-cert"
+  echo "  gateway-check"
+  echo "  gateway-observer-check"
+  echo "  gateway-cert-check"
+  echo "  gateway-balance"
   echo
-  echo "Important:"
-  echo "  This installer did not run platform registration commands."
-  echo "  Solana mode requires the operator keyfile:"
-  echo "  ${INSTALL_DIR}/wallets/${AR_IO_WALLET}.json"
-  if [[ "$OBSERVER_WALLET" != "$AR_IO_WALLET" ]]; then
-    echo "  Observer reports also require the observer keyfile:"
-    echo "  ${INSTALL_DIR}/wallets/${OBSERVER_WALLET}.json"
-  fi
+  echo "Tum komutlar: gateway-help"
+  echo "Interaktif yonetim: gateway"
+  echo
+  echo "Bu kurulum gateway'i AR.IO Network'e kaydetmedi ve stake islemi yapmadi."
   echo
   /usr/local/bin/gateway-check || true
 }
