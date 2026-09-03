@@ -32,7 +32,7 @@ Bu bölümün amacı satın aldığınız domaini gateway sunucusuna bağlamakt�
 Örnek olarak:
 
 - satın aldığınız domain: `example.com`
-- gateway sunucunuzun IP adresi: `203.0.113.10`
+- gateway sunucunuzun public IPv4 adresi: `SUNUCU_IP_ADRESINIZ`
 
 Namecheap hesabınızda şu yolu açın:
 
@@ -45,7 +45,7 @@ Namecheap hesabınızda şu yolu açın:
 ```text
 Type:  A Record
 Host:  @
-Value: 203.0.113.10
+Value: SUNUCU_IP_ADRESINIZ
 TTL:   Automatic
 ```
 
@@ -56,13 +56,13 @@ Bu kayıt `example.com` adresini sunucunuza yönlendirir.
 ```text
 Type:  A Record
 Host:  *
-Value: 203.0.113.10
+Value: SUNUCU_IP_ADRESINIZ
 TTL:   Automatic
 ```
 
 Bu kayıt `herhangi-bir-ad.example.com` biçimindeki adresleri aynı sunucuya yönlendirir. AR.IO gateway'in wildcard alan adlarıyla çalışabilmesi için gereklidir.
 
-Her iki kayıtta da `Value` alanına örnekteki IP'yi değil, kendi gateway sunucunuzun public IPv4 adresini yazın. Kayıtları kaydettikten sonra DNS'in etkinleşmesi için yaklaşık 30 dakika bekleyin.
+Her iki kayıtta da `SUNUCU_IP_ADRESINIZ` yerine kendi gateway sunucunuzun public IPv4 adresini yazın. Kayıtları kaydettikten sonra DNS'in etkinleşmesi için yaklaşık 30 dakika bekleyin.
 
 Namecheap ekranında `Host Records` bölümü düzenlenemiyorsa DNS'iniz Namecheap tarafından yönetilmiyor olabilir. Bu durumda kolay kuruluma devam etmeden önce nameserver ayarınızı kontrol edin.
 
@@ -136,7 +136,7 @@ Yalnızca API key veya `/v0/transactions` gibi Enhanced API adresi yazmayın. Ö
 Kurucu sunucunun public IPv4 adresini gösterecek:
 
 ```text
-Sunucu public IPv4: 203.0.113.10
+Sunucu public IPv4: SUNUCU_IP_ADRESINIZ
 API erisimi acik ve bu IPv4 whitelist'e eklendi mi [y/N]:
 ```
 
