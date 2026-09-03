@@ -1,0 +1,21 @@
+name: Shell checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and smoke tests
+        run: bash tests/smoke.sh
+      - name: ShellCheck errors
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --severity=error install-gateway.sh gateway-manager.sh update-tools.sh tests/smoke.sh
