@@ -193,10 +193,11 @@ MODE_OPTIONS
 
   echo
   log "Gerekli gateway bilgileri"
-  echo "Alan adini https:// ve *. olmadan yazin. Ornek: gateway.example.com"
+  echo "Namecheap'te @ ve * A kayitlarini yonlendirdiginiz domaini yazin."
+  echo "Ornek: example.com  (https:// veya *. yazmayin)"
 
   DOMAIN="$(normalize_domain "$(prompt "Gateway alan adi" "$DOMAIN")")"
-  is_domain "$DOMAIN" || die "gateway.example.com gibi gecerli bir alan adi girin; https://, yol veya *. eklemeyin."
+  is_domain "$DOMAIN" || die "example.com gibi gecerli bir alan adi girin; https://, yol veya *. eklemeyin."
 
   echo
   echo "AR.IO kaydinizdaki ana/operator Solana PUBLIC adresini yazin."

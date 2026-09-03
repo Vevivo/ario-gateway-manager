@@ -27,14 +27,46 @@ Resmi minimum sistem gereksinimi 4 CPU, 4 GB RAM, 500 GB depolama ve 50 Mbps ba�
 
 ### Namecheap DNS kayıtları
 
-Örneğin gateway adresiniz `gateway.example.com`, sunucu IP'niz `203.0.113.10` ise Namecheap Advanced DNS bölümünde:
+Bu bölümün amacı satın aldığınız domaini gateway sunucusuna bağlamaktır.
 
-| Type | Host | Value |
-|---|---|---|
-| A Record | `gateway` | `203.0.113.10` |
-| A Record | `*.gateway` | `203.0.113.10` |
+Örnek olarak:
 
-Doğrudan `example.com` kullanıyorsanız Host değerleri `@` ve `*` olur. DNS başka bir sağlayıcının nameserver'larıyla yönetiliyorsa kolay mod yerine gelişmiş kurulumu seçip o sağlayıcıya uygun SSL yöntemini kullanın.
+- satın aldığınız domain: `example.com`
+- gateway sunucunuzun IP adresi: `203.0.113.10`
+
+Namecheap hesabınızda şu yolu açın:
+
+`Domain List > Manage > Advanced DNS > Host Records`
+
+`Add New Record` düğmesiyle aşağıdaki iki kaydı oluşturun.
+
+**Birinci kayıt, ana domain için:**
+
+```text
+Type:  A Record
+Host:  @
+Value: 203.0.113.10
+TTL:   Automatic
+```
+
+Bu kayıt `example.com` adresini sunucunuza yönlendirir.
+
+**İkinci kayıt, gateway alt alan adları için:**
+
+```text
+Type:  A Record
+Host:  *
+Value: 203.0.113.10
+TTL:   Automatic
+```
+
+Bu kayıt `herhangi-bir-ad.example.com` biçimindeki adresleri aynı sunucuya yönlendirir. AR.IO gateway'in wildcard alan adlarıyla çalışabilmesi için gereklidir.
+
+Her iki kayıtta da `Value` alanına örnekteki IP'yi değil, kendi gateway sunucunuzun public IPv4 adresini yazın. Kayıtları kaydettikten sonra DNS'in etkinleşmesi için yaklaşık 30 dakika bekleyin.
+
+Namecheap ekranında `Host Records` bölümü düzenlenemiyorsa DNS'iniz Namecheap tarafından yönetilmiyor olabilir. Bu durumda kolay kuruluma devam etmeden önce nameserver ayarınızı kontrol edin.
+
+Resmi anlatımlar: [AR.IO ağ kurulumu](https://docs.ar.io/build/run-a-gateway/quick-start/#set-up-networking) ve [Namecheap A kaydı rehberi](https://www.namecheap.com/support/knowledgebase/article.aspx/319/2237/how-can-i-set-up-an-a-address-record-for-my-domain/).
 
 ## Kolay kurulumda sorulara ne yazılacak?
 
@@ -62,7 +94,7 @@ Kolay mod otomatik olarak şunları seçer:
 Gateway alan adi:
 ```
 
-**Cevap örneği:** `gateway.example.com`
+**Cevap örneği:** `example.com`
 
 `https://`, `/` ile biten yol veya `*.` yazmayın.
 
