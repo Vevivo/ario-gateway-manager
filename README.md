@@ -228,6 +228,7 @@ Seed phrase ve private key'i sohbetlere, destek kanallarına veya web formların
 Şu komutları sırayla çalıştırın:
 
 ```bash
+gateway-release-check
 gateway-doctor
 gateway-check
 gateway-observer-check
@@ -237,6 +238,7 @@ gateway-balance
 
 | Komut | Beklenen sonuç |
 |---|---|
+| `gateway-release-check` | Çalışan sürüm, son resmi sürüm ve Release 83 temel kontrolleri |
 | `gateway-doctor` | Temel kontrollerin `OK` görünmesi |
 | `gateway-check` | Test verisi olarak `1984`, gateway bilgisi ve çalışan servisler |
 | `gateway-observer-check` | Observer yapılandırması, keypair ve rapor durumu |
@@ -263,6 +265,7 @@ Günlük kullanımda en çok gerekenler:
 |---|---|
 | `gateway-status` | Servis, CPU, RAM, disk ve inode durumunu gösterir |
 | `gateway-logs` | Gateway ve observer loglarını canlı gösterir; `Ctrl+C` servisleri durdurmaz |
+| `gateway-release-check` | Çalışan node sürümünü son resmi sürümle karşılaştırır ve yeni retrieval metriklerini kontrol eder |
 | `gateway-check` | Public veri, gateway info, observer raporu ve servisleri test eder |
 | `gateway-doctor` | Sağlık, TLS, disk, anahtarlar ve yapılandırma için kapsamlı teşhis yapar |
 | `gateway-update` | Gateway'i güvenli biçimde günceller; persistent veriyi silmez |
@@ -294,6 +297,27 @@ gateway-logs
 ```
 
 İlk açılışta raporun bir süre hazır olmaması gateway'in bozuk olduğu anlamına gelmez. Keypair eşleşmesi, servis sağlığı ve loglar birlikte kontrol edilmelidir.
+
+## Release 83 kontrolü
+
+Yeni kurulum Release 83 ile gelen önerilen temeli açıkça uygular: ArNS önce zincirden çözülür, son resolver bekleme süresi 5 saniyedir, `leaving` durumundaki gateway'ler peer olarak kullanılmaz, chunk cache index tabanlı temizlenir ve aynı veriye gelen eşzamanlı istekler birleştirilir.
+
+Kurulu sürümü, ayarları ve `short_reads_rejected_total` dahil yeni metrikleri görmek için:
+
+```bash
+gateway-release-check
+```
+
+Mevcut bir gateway'i Release 83'e geçirmek için sırasıyla:
+
+```bash
+gateway-tools-update
+gateway-update
+gateway-storage-setup
+gateway-release-check
+```
+
+`FOREGROUND_CACHE_MAX_SIZE` ve `FOREGROUND_CACHE_CONCURRENCY` için tek bir doğru değer yoktur. Resmi sürüm bunları varsayılan olarak sınırsız bırakır; bu repo da sunucunun trafik ve disk yapısını bilmeden rastgele sınır koymaz. Durumu görmek için `gateway-cache-advisor` kullanılabilir.
 
 ## Mevcut gateway'e yalnız yönetim araçlarını eklemek
 
@@ -334,5 +358,6 @@ Planlanan geliştirmeler: [Geliştirme yol haritası](docs/ROADMAP.md)
 - [Automating SSL](https://docs.ar.io/build/run-a-gateway/manage/ssl-certs/)
 - [AR.IO SDK](https://docs.ar.io/sdks/ar-io-sdk/)
 - [Official ar-io-node repository](https://github.com/ar-io/ar-io-node)
+- [AR.IO Node Release 83](https://github.com/ar-io/ar-io-node/releases/tag/r83)
 
 Bu repo resmi AR.IO yazılımının yerine geçmez; resmi `ar-io-node` kurulumunu ve operasyonunu kolaylaştıran bir topluluk aracıdır.

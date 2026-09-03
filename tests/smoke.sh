@@ -16,7 +16,7 @@ done
 help_output="$(./gateway-manager.sh help)"
 for command in \
   gateway-doctor gateway-storage-setup gateway-cert-setup gateway-enable-x402 \
-  gateway-network-info gateway-network-readiness gateway-verification gateway-cdb64-check gateway-cache-advisor \
+  gateway-network-info gateway-network-readiness gateway-verification gateway-cdb64-check gateway-cache-advisor gateway-release-check \
   gateway-guides; do
   grep -q "$command" <<< "$help_output" || fail "$command is missing from gateway-help"
 done
@@ -68,6 +68,12 @@ grep -q 'sites-available/ar-io-' install-gateway.sh || fail "domain-specific NGI
 ! grep -q 'apt-get upgrade' install-gateway.sh || fail "installer upgrades unrelated system packages"
 grep -q 'Install Docker Compose 2.24.4 or newer' install-gateway.sh || fail "shared Docker engine protection is missing"
 grep -q 'ALLOW_EXISTING_INSTALL' install-gateway.sh || fail "existing gateway overwrite guard is missing"
+grep -q '^ARNS_COMPOSITE_LAST_RESOLVER_TIMEOUT_MS=5000' install-gateway.sh || fail "r83 ArNS fallback timeout is missing"
+grep -q '^SKIP_LEAVING_GATEWAYS=true' install-gateway.sh || fail "r83 leaving-peer policy is missing"
+grep -q '^FOREGROUND_CACHE_COALESCE_MAX_ATTEMPTS=2' install-gateway.sh || fail "r83 request coalescing baseline is missing"
+grep -q 'short_reads_rejected_total' gateway-manager.sh || fail "r83 short-read metric check is missing"
+[[ "$(grep -c '^    cdb64-check)' gateway-manager.sh)" == "1" ]] || fail "duplicate cdb64 dispatch entry found"
+[[ "$(grep -c 'name=.*ArNS name to unblock' gateway-manager.sh)" == "1" ]] || fail "duplicate unblock prompt found"
 [[ -f docs/OPERATIONS.md ]] || fail "advanced operations guide is missing"
 grep -q 'ENABLE_CHUNK_DATA_CACHE_CLEANUP true' gateway-manager.sh || fail "chunk drift reconciler is not enabled"
 grep -q 'CONTIGUOUS_DATA_CACHE_CLEANUP_THRESHOLD "$ttl"' gateway-manager.sh || fail "TTL storage profile is missing"
@@ -112,5 +118,24 @@ TTL_INPUT
 [[ "$(get_env ENABLE_CHUNK_DATA_CACHE_INDEX)" == "false" ]] || fail "TTL profile left the chunk index enabled"
 [[ "$(get_env CONTIGUOUS_DATA_CACHE_CLEANUP_THRESHOLD)" == "14400" ]] || fail "TTL contiguous cleanup was not applied"
 [[ "$(get_env CHUNK_DATA_CACHE_AGGRESSIVE_MIN_AGE_SECONDS)" == "86400" ]] || fail "chunk ingest cleanup floor was not protected"
+
+curl() {
+  if [[ "$*" == *'/ar-io/info'* ]]; then
+    printf '{"release":83}\n'
+  elif [[ "$*" == *'/releases/latest'* ]]; then
+    printf '{"tag_name":"r83"}\n'
+  elif [[ "$*" == *'/ar-io/__gateway_metrics'* ]]; then
+    printf '%s\n' \
+      '# HELP short_reads_rejected_total test' \
+      '# HELP ar_io_peers_skipped_leaving_total test' \
+      '# HELP foreground_cache_skipped_total test' \
+      '# HELP foreground_cache_coalesced_outcome_total test' \
+      '# HELP foreground_cache_re_elections_total test'
+  fi
+}
+release_output="$(cmd_release_check)"
+grep -q 'running release: 83' <<< "$release_output" || fail "release checker did not read the local release"
+grep -q 'latest GitHub release: r83' <<< "$release_output" || fail "release checker did not read the latest release"
+grep -q 'Metric available: short_reads_rejected_total' <<< "$release_output" || fail "release checker did not inspect r83 metrics"
 
 echo "All smoke tests passed."

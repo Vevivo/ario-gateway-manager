@@ -119,6 +119,24 @@ gateway-restart
 
 Bu komut volume silmeden servisleri yeniden oluşturur.
 
+## Release 83 doğrulaması
+
+```bash
+gateway-release-check
+```
+
+Komut çalışan `/ar-io/info` sürümünü GitHub'daki son resmi sürümle karşılaştırır ve şu Release 83 tabanını denetler:
+
+- `ARNS_RESOLVER_PRIORITY_ORDER=on-demand,gateway`;
+- `ARNS_COMPOSITE_LAST_RESOLVER_TIMEOUT_MS=5000`;
+- `SKIP_LEAVING_GATEWAYS=true` veya Release 83'ün aynı davranıştaki varsayılanı;
+- index tabanlı chunk cache eviction;
+- kısa okuma reddi, leaving peer ve foreground request coalescing metrikleri.
+
+Truncated-response doğrulaması, manifest/ArNS blocklist düzeltmesi, x402 CDP düzeltmeleri ve ADR-0029 rent refund desteği node/observer koduyla gelir; bunlar için ayrı bir kurucu seçeneği yoktur. `gateway-update` güncel resmi kodu ve sabitlenmiş container image'larını uygular.
+
+Release 83, farklı büyük objelerin aynı anda cache'e yazılmasını sınırlayan `FOREGROUND_CACHE_MAX_SIZE` ve `FOREGROUND_CACHE_CONCURRENCY` değerlerini bilinçli olarak `0` yani sınırsız bırakır. Trafik profili ölçülmeden evrensel bir sayı seçilmemelidir. `gateway-cache-advisor` mevcut değerleri gösterir fakat canlı ayarı otomatik değiştirmez.
+
 ## Resmi yönetim konularının karşılığı
 
 | Resmi konu | Repo karşılığı |

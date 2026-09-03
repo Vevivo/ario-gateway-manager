@@ -158,6 +158,7 @@ Daily operations
   gateway-doctor          Run a complete read-only diagnostic report
   gateway-status          Show services, resources, disk, and inode usage
   gateway-logs            Follow core, observer, and envoy logs
+  gateway-release-check   Compare the running node with the latest release
   gateway-update          Safely update ar-io-node from the stable main branch
   gateway-restart         Recreate services without deleting persistent data
 
@@ -214,6 +215,7 @@ cmd_menu() {
 8) Update gateway
 9) Restart gateway
 10) Optional features
+11) Release and retrieval status
 0) Exit
 MENU
     local choice
@@ -229,6 +231,7 @@ MENU
       8) cmd_update || true ;;
       9) cmd_restart || true ;;
       10) cmd_features || true ;;
+      11) cmd_release_check || true ;;
       0) return ;;
       *) warn "Unknown selection." ;;
     esac
@@ -266,6 +269,64 @@ cmd_check() {
   echo
   echo "=== Docker services ==="
   compose ps
+}
+
+cmd_release_check() {
+  resolve_install_dir
+  local local_release latest_json latest_tag local_number="" latest_number=""
+  local metrics metric order last_timeout leaving max_size concurrency
+  local_release="$(curl -fsS --max-time 15 http://127.0.0.1:3000/ar-io/info 2>/dev/null | jq -r '.release // empty' || true)"
+  latest_json="$(curl -fsS --max-time 15 -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ar-io/ar-io-node/releases/latest 2>/dev/null || true)"
+  latest_tag="$(printf '%s' "$latest_json" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+  [[ "$local_release" =~ ([0-9]+) ]] && local_number="${BASH_REMATCH[1]}"
+  [[ "$latest_tag" =~ ([0-9]+) ]] && latest_number="${BASH_REMATCH[1]}"
+
+  echo "=== AR.IO node release ==="
+  echo "running release: ${local_release:-unavailable}"
+  echo "latest GitHub release: ${latest_tag:-unavailable}"
+  echo "git commit: $(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unavailable)"
+  if [[ -n "$local_number" && -n "$latest_number" ]]; then
+    if (( local_number < latest_number )); then
+      warn "A newer recommended release is available. Review its notes, then run gateway-update."
+    else
+      pass "The running node is at the latest published release or newer."
+    fi
+  else
+    warn "The local or latest release number could not be compared."
+  fi
+
+  echo
+  echo "=== Release 83 baseline ==="
+  order="$(get_env ARNS_RESOLVER_PRIORITY_ORDER)"
+  last_timeout="$(get_env ARNS_COMPOSITE_LAST_RESOLVER_TIMEOUT_MS)"
+  leaving="$(get_env SKIP_LEAVING_GATEWAYS)"
+  if [[ -z "$order" || "$order" == "on-demand,gateway" ]]; then pass "ArNS resolves from chain first."; else warn "ArNS priority is ${order}; r83 recommends on-demand,gateway."; fi
+  if [[ -z "$last_timeout" || "$last_timeout" == "5000" ]]; then pass "Last ArNS resolver timeout uses the r83 5-second value."; else warn "ARNS_COMPOSITE_LAST_RESOLVER_TIMEOUT_MS=${last_timeout}."; fi
+  if [[ "$leaving" == "false" ]]; then warn "Leaving gateways are explicitly allowed as peers."; else pass "Leaving gateways are skipped by the explicit setting or r83 default."; fi
+  if [[ "$(get_env ENABLE_CHUNK_DATA_CACHE_INDEX)" == "true" ]]; then pass "Index-driven chunk cache eviction is enabled."; else warn "Index-driven chunk cache eviction is not enabled; run gateway-storage-setup."; fi
+
+  max_size="$(get_env FOREGROUND_CACHE_MAX_SIZE)"
+  concurrency="$(get_env FOREGROUND_CACHE_CONCURRENCY)"
+  info "Foreground write cap: ${max_size:-0/unbounded}; concurrency cap: ${concurrency:-0/unbounded}. Release 83 leaves both deployment-specific."
+
+  echo
+  echo "=== Release 83 metrics ==="
+  metrics="$(curl -fsS --max-time 15 http://127.0.0.1:3000/ar-io/__gateway_metrics 2>/dev/null || true)"
+  if [[ -z "$metrics" ]]; then
+    warn "Gateway metrics endpoint is unavailable."
+    return
+  fi
+  for metric in short_reads_rejected_total ar_io_peers_skipped_leaving_total foreground_cache_skipped_total foreground_cache_coalesced_outcome_total foreground_cache_re_elections_total; do
+    if grep -Eq "^(# (HELP|TYPE) )?${metric}([ {]|$)" <<< "$metrics"; then
+      pass "Metric available: ${metric}"
+    else
+      warn "Metric not exposed yet: ${metric}"
+    fi
+  done
+  echo
+  printf '%s\n' "$metrics" \
+    | grep -E '^(short_reads_rejected_total|ar_io_peers_skipped_leaving_total|foreground_cache_(skipped|coalesced_outcome|re_elections)_total)(\{|[[:space:]])' \
+    | head -30 || true
 }
 
 cmd_status() {
@@ -1159,6 +1220,9 @@ cmd_cache_advisor() {
   echo "Advanced NGINX cache readiness"
   echo "filesystem usage: $used | available: $available"
   echo "x402: $x402 | proxy_cache_path detected: $configured"
+  echo "foreground max item bytes: $(get_env FOREGROUND_CACHE_MAX_SIZE) (blank/0 = unbounded)"
+  echo "foreground write concurrency: $(get_env FOREGROUND_CACHE_CONCURRENCY) (blank/0 = unbounded)"
+  echo "coalescing minimum bytes: $(get_env FOREGROUND_CACHE_COALESCE_MIN_SIZE) (blank/0 = no floor)"
   echo
   echo "The ar.io node works without an NGINX cache. It is intended for high-traffic gateways."
   echo "A production design must size each cache zone, leave room for SQLite/ClickHouse and the OS,"
@@ -1421,7 +1485,7 @@ cmd_install_links() {
   local command
   for command in \
     gateway gateway-help gateway-check gateway-doctor gateway-status gateway-logs \
-    gateway-update gateway-restart gateway-balance gateway-observer-check \
+    gateway-release-check gateway-update gateway-restart gateway-balance gateway-observer-check \
     gateway-network-info \
     gateway-storage gateway-storage-setup gateway-cert-check gateway-cert-setup \
     gateway-renew-cert gateway-x402-check gateway-enable-x402 gateway-grafana \
@@ -1466,6 +1530,7 @@ dispatch() {
     doctor) cmd_doctor "$@" ;;
     status) cmd_status "$@" ;;
     logs) cmd_logs "$@" ;;
+    release-check) cmd_release_check "$@" ;;
     update) cmd_update "$@" ;;
     restart) cmd_restart "$@" ;;
     balance) cmd_balance "$@" ;;
